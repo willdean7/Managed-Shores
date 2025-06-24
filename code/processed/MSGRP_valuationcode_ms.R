@@ -1,6 +1,7 @@
 # Jonah Danziger
+# Purpose: Integrates property, land value, sea level, and wave data to assess coastal vulnerability and optimal retreat timing for coastal real estate.
 rm(list=ls()) # clear the environment
-#-------Import necessary packages here-------------------#
+
 library(tidyverse) # importing a package
 library(lubridate)
 library(janitor)
@@ -21,52 +22,62 @@ library(doParallel)
 library(dplyr)
 library(terra)
 library(torch)
+library(mapview)
+library(viridis)
 
-#### Load Data and Prep it
-redfin_df<-read_csv("C:/Users/jonah/Documents/Research/Wetland Restoration/Redfin/redfin_df.csv")
+#### Load Redfin Data and Prep it
+redfin_df<-read_csv("data/carpinteria/redfin_df.csv")
+
 # Define the bounding box (xmin, ymin, xmax, ymax) 
-#Change this for the area of your interest
-bbox <- st_bbox(c(xmin = -118.17, ymin = 33.45, xmax = -117.83, ymax = 33.76), crs = st_crs(4326))
+####Change this for the area of your interest####
+bbox <- st_bbox(c(xmin = -119.55, ymin = 34.39, xmax = -119.52, ymax = 34.41), crs = st_crs(4326))
 
 # Convert the dataframe into an sf object
 redfin_sf<- redfin_df|>
-  filter(!is.na(longitude) & !is.na(latitude))|>
-  st_as_sf(coords = c("longitude", "latitude"), crs = 4326)|>
+  filter(!is.na(LONGITUDE) & !is.na(LATITUDE))|>
+  st_as_sf(coords = c("LONGITUDE", "LATITUDE"), crs = 4326)|>
   st_crop(bbox) |>
   mutate(rent=12*rentalval)
-# Assuming your sf object is named 'sf_data'
-coordinates <- st_coordinates(redfin_sf)
 
-# Add the coordinates as separate columns to your sf data frame
+# Making separate columns for longitude and latitude
+coordinates <- st_coordinates(redfin_sf)
 redfin_sf$longitude <- coordinates[,1]
 redfin_sf$latitude <- coordinates[,2]
 
-landvals <- read_csv("C:/Users/jonah/Documents/Research/Wetland Restoration/landprices_CA.csv", skip = 1)
+### Integrating the Land Value Data
+#load data (per acre and land share of property value)
+landvals <- read_csv("data/landprices_CA_ms.csv", skip = 1)
 landvals<-landvals |> filter (Year==2022) |> dplyr::select("Land Value\n(Per Acre, As-Is)", "ZIP Code","Land Share of Property Value")|>
-  rename(landval_acre="Land Value\n(Per Acre, As-Is)",landshare="Land Share of Property Value", "ZIP OR POSTAL CODE"="ZIP Code")
+  rename(landval_acre="Land Value\n(Per Acre, As-Is)",landshare="Land Share of Property Value", "ZIP OR POSTAL CODE"="ZIP Code") |>
+  mutate(`ZIP OR POSTAL CODE` = as.character(`ZIP OR POSTAL CODE`))
+# calculate the average land share for properties without zip match
 avg_share<- mean(landvals$landshare)
+#join the land value data to the redfin data by ZIP Code
 redfin_sf<-redfin_sf |> left_join(landvals,by=c("ZIP OR POSTAL CODE")) |>
   mutate(landval=PRICE*landshare)|>
   mutate(landval=ifelse(is.na(landval),PRICE*avg_share, landval))|>
   mutate(strval=PRICE-landval)
 
 
+### Integrating Wave Run-up Data
 
-wave_data<-read_csv("C:/Users/jonah/Documents/Research/Wetland Restoration/run_up_data.csv")
-####Establish the baseline sea level 
+#load data
+wave_data<-read_csv("data/carpinteria/run_up_data.csv")
+##Establish the baseline sea level 
 #These values of sealevel were taken from the NOAA 
 sea_level_data_sim <- data.frame(
   time = c(0, 10,20, 30, 40, 50, 60, 70, 80),
   sea_level_rise = c(0, 0.1158, 0.2012, 0.2987,  0.4694, 0.6797, 0.9114, 1.1613, 1.4508)  )
 sea_level_data_sim$timesquared<-sea_level_data_sim$time**2
+#Fit a quadratic model to project slr over time
 sea_model <- lm(sea_level_rise ~ time +timesquared, data=sea_level_data_sim)
-# Create prediction time range
+# Create prediction time range (1 to 100 yrs)
 sea_level_base <- data.frame(
   time = 1:100,
   timesquared = (1:100)^2
 )
 
-# Predict using your quadratic model
+# Predict slr for each year
 sea_level_predictions <- predict(sea_model, newdata = sea_level_base)
 
 # Combine time and prediction into a data frame
@@ -82,7 +93,7 @@ depth_df <- data.frame(
                 0.30, 0.33, 0.36, 0.38, 0.39, 0.39)
 )
 
-# Fit logistic function with nls
+# Fit logistic function to model damage as a function of flood depth
 logistic_nls <- nls(
   damagepct ~ a / (1 + exp(-b * (depth - d))),
   data = depth_df,
@@ -106,6 +117,8 @@ strdamagefxn <- function(depthparams, sealevel, elevation, strval){
   strdamage <- damage_percent * str_view_all
   return(strdamage)
 }
+
+# Function to calculate NPV of future rental income
 npvrentfxn <- function(littleT, bigT, rentvalues, beta) {
   # Number of periods
   n_periods <- bigT - littleT + 1
@@ -121,7 +134,10 @@ npvrentfxn <- function(littleT, bigT, rentvalues, beta) {
   
   return(as.vector(npv))  # Return vector of NPV per property
 }
+# test the NPV for properties from year 1 to 25 with discount rate of 3%/yr (0.97)
 rent_test <- npvrentfxn(littleT=1, bigT=25, rentvalues=redfin_sf$rent, beta=0.97)
+
+#function to calculate expected damages
 expdamagefxnvect <- function(littleT, bigT, depthparams, sealevelbase, shocks, realestate, beta) {
   num_periods <- bigT - littleT + 1
   num_shocks <- length(shocks)
@@ -167,8 +183,10 @@ expdamagefxnvect <- function(littleT, bigT, depthparams, sealevelbase, shocks, r
   
   return(present_value_damages)
 }
+# Test the function with example parameters
 expdamage_test<-expdamagefxnvect(little=5, bigT=100, depthparams=depth_params, sealevelbase=sea_level_predictions, shocks=wave_data$run_up, realestate=redfin_sf, beta=0.97)
 
+# Alternative function to calculate expected damages (simpler, less vectorized)
 expdamagefxn <- function(littleT, bigT, depthparams, sealevelbase, shocks, realestate, beta) {
   num_periods <- bigT - littleT + 1
   num_shocks <- length(shocks)
@@ -205,12 +223,15 @@ expdamagefxn <- function(littleT, bigT, depthparams, sealevelbase, shocks, reale
 expdamage_test2<-expdamagefxn(little=5, bigT=100, depthparams=depth_params, sealevelbase=sea_level_predictions, shocks=wave_data$run_up, realestate=redfin_sf, beta=0.97)
 
 #Final Piece
+# Function to find the optimal year to retreat for each property
 optimalStoppingDate <- function(bigT, depthparams, sealevelbase, shocks, realestate, beta){
   num_rows <- nrow(realestate)
   T_star<- rep(100, num_rows)
   for (t in 1:bigT){
     print(t)
+    # Calculate NPV of future rents from year t to bigT
     future_rent <- npvrentfxn(littleT=t, bigT=bigT, rentvalues=realestate$rent, beta=beta)
+    # Calculate expected damages from year t to bigT
     exp_damages_t<- expdamagefxn(little=t, bigT=bigT, depthparams=depthparams, sealevelbase=sealevelbase, shocks=shocks, realestate=realestate , beta=beta)
     # Find where T_star hasn't been set (== 100) and condition is met
     to_stop <- (T_star == 100) & ((future_rent - exp_damages_t) <= 0)
@@ -222,4 +243,31 @@ optimalStoppingDate <- function(bigT, depthparams, sealevelbase, shocks, realest
   return(T_star)
   }
 
-optimalStoppingDate(bigT=100, depthparams= depth_params, sealevelbase=sea_level_predictions, shocks=wave_data$run_up, realestate=redfin_sf, beta=0.97)
+# Calculate optimal retreat year for each property
+retreat_years <- optimalStoppingDate(bigT=100, depthparams= depth_params, 
+                                     sealevelbase=sea_level_predictions, shocks=wave_data$run_up, 
+                                     realestate=redfin_sf, beta=0.97)
+
+# Assign retreat years to the real estate data
+redfin_sf$retreat_year <- retreat_years
+
+#map
+mapview(
+  redfin_sf,
+  zcol = "retreat_year",           
+  legend = TRUE,                   
+  col.regions = rev(inferno(100)), 
+  cex = 5,                         
+  alpha = 0.7,                     
+  layer.name = "Optimal Retreat Year"
+)
+
+#Save
+# First we need to extract coordinates before saving 
+coords <- st_coordinates(redfin_sf)
+redfin_no_geom <- st_set_geometry(redfin_sf, NULL)
+redfin_sf_clean <- cbind(redfin_no_geom, coords)
+
+# Save with proper column names
+write.csv(redfin_sf_clean, "data/carpinteria/redfin_sf.csv", row.names = FALSE)
+
