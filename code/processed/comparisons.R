@@ -1,4 +1,5 @@
 ###This script makes an interactive dashboard for neighborhood comparisons
+#Building on the sf created in 'MSGRP_valuationcode_ms.R'
 #It starts by preparing your property data—calculating vulnerability metrics, categorizing properties based 
 #on their optimal retreat year, and identifying the main factors driving those decisions (such as elevation, structure value, and rental income). 
 #The dashboard features a map where users can click on any property to instantly see its details and compare it with its nearest neighbors. 
@@ -20,8 +21,7 @@ library(units)
 # Read vulnerability metrics script
 source("code/processed/calc_vulnerability_metrics.R")
 
-# Read and process data
-redfin_sf <- readr::read_csv("data/carpinteria/redfin_sf.csv") %>%
+redfin_sf <- readr::read_csv("data/silver_strand/redfin_sf.csv") %>%
   st_as_sf(coords = c("longitude", "latitude"), crs = 4326) %>%
   calc_vulnerability_metrics() %>%
   mutate(
@@ -31,7 +31,7 @@ redfin_sf <- readr::read_csv("data/carpinteria/redfin_sf.csv") %>%
       retreat_year <= 25 ~ "Early Retreat (1-25 years)",
       retreat_year <= 50 ~ "Mid-term Retreat (26-50 years)",
       retreat_year <= 75 ~ "Late Retreat (51-75 years)",
-      TRUE ~ "Never Retreat"
+      TRUE ~ "Delayed Retreat"
     )
   )
 
@@ -171,7 +171,7 @@ retreat_dashboard <- function(enhanced_data) {
                 "Interpretation Guide",
                 h3("Understanding the Dashboard"),
                 tags$ul(
-                  tags$li(strong("Map Colors:"), "Show retreat timeline from Immediate (red) to Never (green)"),
+                  tags$li(strong("Map Colors:"), "Show retreat timeline from Immediate (red) to Delayed (gray)"),
                   tags$li(strong("Point Size:"), "Larger points = higher retreat pressure"),
                   tags$li(strong("Primary Drivers:"), "Explain why a property has its specific retreat year")
                 ),
@@ -196,9 +196,17 @@ retreat_dashboard <- function(enhanced_data) {
     selected_property <- reactiveVal(NULL)
     neighbors <- reactiveVal(NULL)
     
+    
     output$interactive_map <- renderLeaflet({
+      enhanced_data <- enhanced_data %>%
+        mutate(retreat_category = factor(
+          retreat_category,
+          levels = c("Immediate Retreat", "Early Retreat (1-25 years)",
+                     "Mid-term Retreat (26-50 years)", "Late Retreat (51-75 years)",
+                     "Delayed Retreat")
+        ))
       pal <- colorFactor(
-        palette = c("#8e0152", "#c51b7d", "#de77ae", "#7fbc41", "#276419"),
+        palette = c("#E24A33", "#FBC15E", "#8EBA42", "#348ABD", "#B2B2B2"),
         domain = enhanced_data$retreat_category
       )
       
@@ -270,9 +278,14 @@ retreat_dashboard <- function(enhanced_data) {
       req(neighbors())
       neighbors() %>%
         st_drop_geometry() %>%
-        select(ADDRESS, retreat_year, risk_level, elevation, distance_m) %>%
-        mutate(across(where(is.numeric), round, 1)) %>%
-        rename_with(~c("Address", "Retreat Year", "Risk Level", "Elevation (m)", "Distance (m)"))
+        dplyr::select(
+          Address = ADDRESS,
+          `Retreat Year` = retreat_year,
+          `Risk Level` = risk_level,
+          `Elevation (m)` = elevation,
+          `Distance (m)` = distance_m
+        ) %>%
+        mutate(across(where(is.numeric), round, 1))
     }, options = list(pageLength = 5, dom = 't'))
     
     # Economic risk analysis plots
@@ -298,52 +311,52 @@ retreat_dashboard <- function(enhanced_data) {
                  y = max(hist_data$counts, na.rm = TRUE) / 2,
                  label = "Poor Economics Threshold", color = "red") +
         labs(title = "Distribution of Rent-to-Structure Ratios",
-                        x = "Annual Rent / Structure Value",
-                        y = "Number of Properties") +
+             x = "Annual Rent / Structure Value",
+             y = "Number of Properties") +
         scale_x_continuous(labels = scales::percent, limits = c(0,0.1)) +
         theme_minimal()
-                 
-        ggplotly(p)
+      
+      ggplotly(p)
     })
+    
+    output$elevation_pressure_plot <- renderPlotly({
+      p <- ggplot(enhanced_data, aes(x = elevation, y = retreat_pressure, 
+                                     color = factor(retreat_year))) +
+        geom_point(alpha = 0.7, size = 3) +
+        scale_color_viridis_d(name = "Retreat Year", 
+                              breaks = c(1, 25, 50, 75, 100),
+                              labels = c("Immediate", "25 yrs", "50 yrs", "75 yrs", "Delayed")) +
+        labs(title = "Elevation vs Economic Retreat Pressure",
+             x = "Elevation (m)", 
+             y = "Retreat Pressure (Structure Value / Rent / Elevation)") +
+        scale_y_continuous(limits = c(0,100)) +
+        theme_minimal()
       
-      output$elevation_pressure_plot <- renderPlotly({
-        p <- ggplot(enhanced_data, aes(x = elevation, y = retreat_pressure, 
-                                   color = factor(retreat_year))) +
-          geom_point(alpha = 0.7, size = 3) +
-          scale_color_viridis_d(name = "Retreat Year", 
-                                breaks = c(1, 25, 50, 75, 100),
-                                labels = c("Immediate", "25 yrs", "50 yrs", "75 yrs", "Never")) +
-          labs(title = "Elevation vs Economic Retreat Pressure",
-               x = "Elevation (m)", 
-               y = "Retreat Pressure (Structure Value / Rent / Elevation)") +
-          scale_y_continuous(limits = c(0,100)) +
-          theme_minimal()
-        
-        ggplotly(p)
-      })
+      ggplotly(p)
+    })
+    
+    output$risk_summary_table <- renderDT({
+      summary_data <- enhanced_data %>%
+        group_by(retreat_category) %>%
+        summarise(
+          Properties = n(),
+          `Avg Elevation (m)` = mean(elevation, na.rm = TRUE),
+          `Avg Structure Value` = mean(strval, na.rm = TRUE),
+          `Avg Annual Rent` = mean(rent, na.rm = TRUE),
+          `Avg Rent/Structure Ratio` = mean(rent_to_structure_ratio, na.rm = TRUE),
+          `Poor Economics (%)` = mean(rent_to_structure_ratio < 0.02, na.rm = TRUE)
+        ) %>%
+        mutate(retreat_category = factor(retreat_category, 
+                       levels = c("Immediate Retreat", "Early Retreat (1-25 years)", 
+                                  "Mid-term Retreat (26-50 years)", "Late Retreat (51-75 years)", 
+                                  "Delayed Retreat"))) %>% arrange(retreat_category)
       
-      output$risk_summary_table <- renderDT({
-        summary_data <- enhanced_data %>%
-          group_by(retreat_category) %>%
-          summarise(
-            Properties = n(),
-            `Avg Elevation (m)` = mean(elevation, na.rm = TRUE),
-            `Avg Structure Value` = mean(strval, na.rm = TRUE),
-            `Avg Annual Rent` = mean(rent, na.rm = TRUE),
-            `Avg Rent/Structure Ratio` = mean(rent_to_structure_ratio, na.rm = TRUE),
-            `Poor Economics (%)` = mean(rent_to_structure_ratio < 0.02, na.rm = TRUE)
-          ) %>%
-          arrange(factor(retreat_category, 
-                         levels = c("Immediate Retreat", "Early Retreat (1-25 years)", 
-                                    "Mid-term Retreat (26-50 years)", "Late Retreat (51-75 years)", 
-                                    "Never Retreat")))
-        
-        datatable(summary_data,
-                  options = list(pageLength = 5, dom = 't'), 
-                  rownames = FALSE) %>%
-          formatCurrency(c("Avg Structure Value", "Avg Annual Rent"), "$") %>%
-          formatPercentage(c("Avg Rent/Structure Ratio", "Poor Economics (%)"), 1)
-      })
+      datatable(summary_data,
+                options = list(pageLength = 5, dom = 't'), 
+                rownames = FALSE) %>%
+        formatCurrency(c("Avg Structure Value", "Avg Annual Rent"), "$") %>%
+        formatPercentage(c("Avg Rent/Structure Ratio", "Poor Economics (%)"), 1)
+    })
     
     # Key Insights
     output$immediate_count <- renderValueBox({
@@ -354,7 +367,7 @@ retreat_dashboard <- function(enhanced_data) {
       immediate <- enhanced_data %>% filter(retreat_year == 1)
       never <- enhanced_data %>% filter(retreat_year == 100)
       diff <- round(mean(never$elevation) - mean(immediate$elevation), 1)
-      valueBox(paste0(diff, "m"), "Avg Elevation Difference (Never vs Immediate)", icon = icon("mountain"), color = "blue")
+      valueBox(paste0(diff, "m"), "Avg Elevation Difference (Delayed vs Immediate)", icon = icon("mountain"), color = "blue")
     })
     
     output$main_driver <- renderValueBox({
@@ -383,4 +396,3 @@ retreat_dashboard <- function(enhanced_data) {
 }
 
 retreat_dashboard(redfin_sf)
-

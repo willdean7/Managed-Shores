@@ -1,5 +1,7 @@
 # Jonah Danziger
 # Purpose: Integrates property, land value, sea level, and wave data to assess coastal vulnerability and optimal retreat timing for coastal real estate.
+
+
 rm(list=ls()) # clear the environment
 
 library(tidyverse) # importing a package
@@ -17,7 +19,6 @@ library(rnaturalearth)
 library(lwgeom)
 library(nngeo)
 library(foreach)
-library(foreach)
 library(doParallel)
 library(dplyr)
 library(terra)
@@ -25,12 +26,13 @@ library(torch)
 library(mapview)
 library(viridis)
 
-#### Load Redfin Data and Prep it
-redfin_df<-read_csv("data/carpinteria/redfin_df.csv")
+#### Load Redfin Data from appropriate folder and Prep it
+redfin_df<-read_csv("data/silver_strand/redfin_df.csv")
 
 # Define the bounding box (xmin, ymin, xmax, ymax) 
 ####Change this for the area of your interest####
-bbox <- st_bbox(c(xmin = -119.55, ymin = 34.39, xmax = -119.52, ymax = 34.41), crs = st_crs(4326))
+#can copy and paste from "waves_ms.R"
+bbox <- st_bbox(c(xmin = -119.2241, ymin = 34.1478, xmax = -119.2138, ymax = 34.1583), crs = st_crs(4326))
 
 # Convert the dataframe into an sf object
 redfin_sf<- redfin_df|>
@@ -45,6 +47,13 @@ redfin_sf$longitude <- coordinates[,1]
 redfin_sf$latitude <- coordinates[,2]
 
 ### Integrating the Land Value Data
+#The dataset landprices_CA_ms.csv provides land values per acre and the land share of property value for California ZIP codes in 2022
+#Each property in the Redfin dataset (redfin_sf) has a ZIP code and a total price (PRICE).
+#The land value data is joined to the property data by matching ZIP codes.
+#The land share (landshare) represents the proportion of the property price attributable to land
+#For each property: landval = PRICE x landshare 
+#If the ZIP code is missing or unmatched, the average land share across all ZIP codes is used as a fallback: landval = PRICE x avg_share
+#The structural value is the residual value of the property after subtracting land value from total price: strval = PRICE - landval
 #load data (per acre and land share of property value)
 landvals <- read_csv("data/landprices_CA_ms.csv", skip = 1)
 landvals<-landvals |> filter (Year==2022) |> dplyr::select("Land Value\n(Per Acre, As-Is)", "ZIP Code","Land Share of Property Value")|>
@@ -53,7 +62,9 @@ landvals<-landvals |> filter (Year==2022) |> dplyr::select("Land Value\n(Per Acr
 # calculate the average land share for properties without zip match
 avg_share<- mean(landvals$landshare)
 #join the land value data to the redfin data by ZIP Code
-redfin_sf<-redfin_sf |> left_join(landvals,by=c("ZIP OR POSTAL CODE")) |>
+redfin_sf<-redfin_sf |> 
+  mutate(`ZIP OR POSTAL CODE` = as.character(`ZIP OR POSTAL CODE`)) |>
+  left_join(landvals,by=c("ZIP OR POSTAL CODE")) |>
   mutate(landval=PRICE*landshare)|>
   mutate(landval=ifelse(is.na(landval),PRICE*avg_share, landval))|>
   mutate(strval=PRICE-landval)
@@ -61,13 +72,13 @@ redfin_sf<-redfin_sf |> left_join(landvals,by=c("ZIP OR POSTAL CODE")) |>
 
 ### Integrating Wave Run-up Data
 
-#load data
-wave_data<-read_csv("data/carpinteria/run_up_data.csv")
+#load data from appropriate folder
+wave_data<-read_csv("data/silver_strand/run_up_data.csv")
 ##Establish the baseline sea level 
-#These values of sealevel were taken from the NOAA 
+#These values of sealevel were taken from the NOAA 2022 Report Intermediate Scenario
 sea_level_data_sim <- data.frame(
-  time = c(0, 10,20, 30, 40, 50, 60, 70, 80),
-  sea_level_rise = c(0, 0.1158, 0.2012, 0.2987,  0.4694, 0.6797, 0.9114, 1.1613, 1.4508)  )
+  time = c(0, 10, 20, 30, 40, 50, 60, 70, 80),
+  sea_level_rise = c(0, 0.1158, 0.2012, 0.2987,  0.4694, 0.6797, 0.9114, 1.1613, 1.4508))
 sea_level_data_sim$timesquared<-sea_level_data_sim$time**2
 #Fit a quadratic model to project slr over time
 sea_model <- lm(sea_level_rise ~ time +timesquared, data=sea_level_data_sim)
@@ -114,7 +125,7 @@ strdamagefxn <- function(depthparams, sealevel, elevation, strval){
   d = depthparams[3]
   #applies damage parameters to real structure values 
   damage_percent = a / (1 + exp(-b * (depth - d)))
-  strdamage <- damage_percent * str_view_all
+  strdamage <- damage_percent * strval ###Changed from str_view_all to strval
   return(strdamage)
 }
 
@@ -269,5 +280,5 @@ redfin_no_geom <- st_set_geometry(redfin_sf, NULL)
 redfin_sf_clean <- cbind(redfin_no_geom, coords)
 
 # Save with proper column names
-write.csv(redfin_sf_clean, "data/carpinteria/redfin_sf.csv", row.names = FALSE)
+write.csv(redfin_sf_clean, "data/silver_strand/redfin_sf.csv", row.names = FALSE)
 

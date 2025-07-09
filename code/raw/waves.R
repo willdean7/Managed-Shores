@@ -1,8 +1,8 @@
 #Jonah Danziger
 #Wave data
 rm(list=ls()) # clear the environment
-
-library(tidyverse)
+#-------Import necessary packages here-------------------#
+library(tidyverse) # importing a package
 library(lubridate)
 library(janitor)
 library(rvest)
@@ -18,10 +18,7 @@ library(raster)
 library(lwgeom)
 library(nngeo)
 library(foreach)
-library(grid) 
-
-
-
+library(grid)  # For arrow type
 #Estimating the Damage function
 #The first part is to estimate slope to get the alphas for the wave run up function
 # Download California shapefile
@@ -51,7 +48,7 @@ coastline <- st_boundary(california_boundary )
 
 # Define the bounding box (xmin, ymin, xmax, ymax) 
 #!!!!!!You can set this to be whatever area you want and it figure this out
-bbox <- st_bbox(c(xmin = -119.55, ymin = 34.39, xmax = -119.52, ymax = 34.41), crs = st_crs(4326))
+bbox <- st_bbox(c(xmin = -118.17, ymin = 33.45, xmax = -117.83, ymax = 33.76), crs = st_crs(4326))
 
 # Crop the coastline data to the bounding box
 coastline_cropped <- st_crop(coastline, bbox)
@@ -171,17 +168,17 @@ coastline_points_df <- coastline_points_df|>
   mutate(coastal_elv=elevation_data$elevation, near_elv = inland_with_elevation$elevation)|>
   mutate(slope = abs((near_elv-coastal_elv)/11))
 
-###You can change the buoy that this is taken from 
+###You can change the buoy thta this is taken from 
 #Importing wave data
 #Retrieve data from this link https://www.ndbc.noaa.gov/obs.shtml
-urlpt1="https://www.ndbc.noaa.gov/view_text_file.php?filename=46053h" #can just change the station number
+urlpt1="https://www.ndbc.noaa.gov/view_text_file.php?filename=46222h"
 urlp2=".txt.gz&dir=data/historical/stdmet/"
 # Define the column names
 column_names <- c("#YY", "MM", "DD", "hh", "WVHT", "DPD", "WTMP")
 # Create an empty dataframe with these column names
 wave_data <- data.frame(matrix(ncol = length(column_names), nrow = 0))
 names(wave_data) <- column_names
-for(i in 2000:2024){
+for(i in 2004:2024){
   url<-paste0(urlpt1, i, urlp2)
   print(i)
 
@@ -205,15 +202,9 @@ wave_df <- wave_data |> filter(WVHT<98 & DPD<99)|>mutate(run_up=1.1*(0.35*slope*
 max_wave_df<-wave_df|>group_by(YYYY)|>
      summarize(run_up=max(run_up))
 
-#plot for fun
-ggplot(max_wave_df, aes(x = YYYY, y = run_up)) +
-  geom_line() +
-  labs(title = "Annual Maximum Wave Run-Up at Carpinteria",
-       x = "Year", y = "Run-Up (m)") +
-  theme_minimal()
 
 
-write.csv(max_wave_df, file = "data/carpinteria/run_up_data.csv", row.names = FALSE)
+write.csv(max_wave_df, file = "C:/Users/jonah/Documents/Research/Wetland Restoration/run_up_data.csv", row.names = FALSE)
 
 
 ####OLD CODE DO NOT USE

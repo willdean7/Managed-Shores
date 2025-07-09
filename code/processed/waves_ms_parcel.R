@@ -169,7 +169,10 @@ elevation_data <- get_elev_point(locations = coastline_points_df,z=14, src = "aw
 #Putting together the pieces for finding the slope
 coastline_points_df <- coastline_points_df|>
   mutate(coastal_elv=elevation_data$elevation, near_elv = inland_with_elevation$elevation)|>
-  mutate(slope = abs((near_elv-coastal_elv)/11))
+  mutate(slope = abs((near_elv-coastal_elv)/11)) %>% filter(between(coastal_elv, -1, 10),
+                                                            between(near_elv, -1, 10)) %>% 
+  filter(slope > 0, slope < 0.2)
+  
 
 ###You can change the buoy that this is taken from 
 #Importing wave data
@@ -201,19 +204,110 @@ g=9.81
 #slope 
 slope = median(coastline_points_df$slope)
 #Using the run-up equation 
-wave_df <- wave_data |> filter(WVHT<98 & DPD<99)|>mutate(run_up=1.1*(0.35*slope*(WVHT*(g*DPD**2)/(2*pi))**0.5+0.5*(WVHT*(g*DPD**2)/(2*pi)*(0.563*(slope**2)+0.004))**0.5))
-max_wave_df<-wave_df|>group_by(YYYY)|>
-     summarize(run_up=max(run_up))
+#wave_df <- wave_data |> filter(WVHT<98 & DPD<99)|>mutate(run_up=1.1*(0.35*slope*(WVHT*(g*DPD**2)/(2*pi))**0.5+0.5*(WVHT*(g*DPD**2)/(2*pi)*(0.563*(slope**2)+0.004))**0.5))
+#max_wave_df<-wave_df|>group_by(YYYY)|>
+# summarize(run_up=max(run_up))
+### Doing pointwise run-up rather than uniform across the coastline
+# Read the saved CSV from your data prep step
+redfin_df <- read_csv("data/silver_strand/redfin_df.csv")
+
+# Convert redfin_df to an sf object with proper geometry
+redfin_sf <- st_as_sf(redfin_df, coords = c("LONGITUDE", "LATITUDE"), crs = 4326)
+# Clean wave data
+wave_df <- wave_data |> 
+  filter(WVHT < 98, DPD < 99)
+
+# Expand wave data across coastal points
+library(tidyr)
+wave_grid <- expand_grid(
+  point_id = seq_len(nrow(coastline_points_df)),
+  wave_df
+)
+
+# Attach slope from each coastal point
+wave_grid <- wave_grid |> 
+  mutate(slope = rep(coastline_points_df$slope, each = nrow(wave_df)))
+
+# Run-up at each point-year combo
+wave_grid <- wave_grid |>
+  mutate(run_up = 1.1 * (
+    0.35 * slope * sqrt(WVHT * (g * DPD^2) / (2 * pi)) +
+      0.5 * sqrt(WVHT * (g * DPD^2) / (2 * pi) * (0.563 * slope^2 + 0.004))
+  ))
+
+# Get max run-up per year and point
+max_runup_pts <- wave_grid |>
+  group_by(point_id, YYYY) |>
+  summarize(run_up = max(run_up, na.rm = TRUE), .groups = "drop")
+
+# Attach coordinates back
+coastal_runup_pts <- coastline_points_df |> 
+  mutate(point_id = row_number()) |>
+  left_join(max_runup_pts, by = "point_id")
+
+# Get parcel centroids
+parcel_centroids <- st_centroid(redfin_sf)
+
+coastal_unique <- coastal_runup_pts[!duplicated(coastal_runup_pts$point_id), ]
+
+# Find nearest coastal point to each parcel
+nearest_indices <- st_nearest_feature(parcel_centroids, coastal_unique)
+
+# Add point_id (nearest coastal point) to each parcel
+parcel_nearest_points <- parcel_centroids %>%
+  mutate(point_id = nearest_indices,
+         parcel_id = row_number(),
+         ADDRESS = redfin_df$ADDRESS,
+         URL = redfin_df$URL)
+
+# Join parcels with max_runup_pts (point_id, YYYY, run_up)
+parcel_runup_time_series <- parcel_nearest_points %>%
+  st_drop_geometry() %>%
+  left_join(max_runup_pts, by = "point_id")
+
+# Reattach geometry for each parcel
+parcel_runup_sf <- parcel_centroids %>%
+  mutate(parcel_id = row_number()) %>%
+  left_join(parcel_runup_time_series %>% dplyr::select(parcel_id, YYYY, run_up), by = "parcel_id")
+
+# Now group by geometry and compute max run-up
+max_runup <- parcel_runup_sf %>%
+  group_by(parcel_id) %>%
+  summarize(geometry = first(geometry),
+            max_run_up = max(run_up, na.rm = TRUE),
+            .groups = "drop") %>%
+  st_as_sf()
 
 #plot for fun
-ggplot(max_wave_df, aes(x = YYYY, y = run_up)) +
+parcel_runup_sf %>%
+  filter(parcel_id == 1) %>%
+  ggplot(aes(x = YYYY, y = run_up)) +
   geom_line() +
-  labs(title = "Annual Maximum Wave Run-Up at Silver Strand",
-       x = "Year", y = "Run-Up (m)") +
+  labs(title = "Run-Up Over Time for Parcel 1",
+       x = "Year",
+       y = "Run-Up (m)") +
   theme_minimal()
 
+slope_df <- coastal_runup_pts %>%
+  st_drop_geometry() %>%
+  dplyr::select(point_id, slope) %>%
+  distinct(point_id, .keep_all = TRUE)
 
-write.csv(max_wave_df, file = "data/silver_strand/run_up_data.csv", row.names = FALSE)
+# Select relevant columns and convert back to dataframe
+runup_df <- parcel_runup_time_series %>%
+  left_join(slope_df, by = "point_id") %>%
+  left_join(
+    redfin_df %>%
+      mutate(parcel_id = row_number()) %>%
+      dplyr::select(parcel_id, `ADDRESS`, `URL`),
+    by = "parcel_id"
+  ) %>%
+  distinct(parcel_id, YYYY, .keep_all = TRUE) %>% 
+  dplyr::rename(ADDRESS = ADDRESS.y, URL = URL.y) %>%
+  dplyr::select(ADDRESS, URL, YYYY, run_up, slope)
+
+write.csv(runup_df, file = "data/silver_strand/run_up_data.csv", row.names = FALSE)
+
 
 
 ####OLD CODE DO NOT USE
