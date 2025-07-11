@@ -27,7 +27,7 @@ library(mapview)
 library(viridis)
 
 #### Load Redfin Data from appropriate folder and Prep it
-redfin_df<-read_csv("data/silver_strand/redfin_df.csv")
+redfin_df<-read_csv("data/carpinteria/redfin_df.csv")
 
 # Define the bounding box (xmin, ymin, xmax, ymax) 
 ####Change this for the area of your interest####

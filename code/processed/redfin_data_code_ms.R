@@ -30,17 +30,18 @@ library(here)
 library(lwgeom)
 library(nngeo)
 library(readr)
+library(httr)
 
 #Part 1 Concatenate into a unified dataset
 #Choose your working directory/location of interest
-redfin_df<-read_csv(here("data/silver_strand/redfin_2025-01.csv"))
+redfin_df<-read_csv(here("data/carpinteria/redfin_2025-01.csv"))
 
 ##This is for combining multiple redfin .csv (Redfin imposes 350 home limit on downloads)
 for (i in 2:70){
   if (i<10){
-    path<-paste0("data/silver_strand/redfin_2025-0",i,".csv")
+    path<-paste0("data/carpinteria/redfin_2025-0",i,".csv")
   }else{
-    path<-paste0("data/silver_strand/redfin_2025-",i,".csv")
+    path<-paste0("data/carpinteria/redfin_2025-",i,".csv")
   }
   red_temp<-read_csv(path)
   redfin_df<-rbind(redfin_df,red_temp)
@@ -64,33 +65,33 @@ redfin_df <- redfin_df |>
 redfin_df <- redfin_df |> 
   distinct(ADDRESS, .keep_all = TRUE)
 
-# Filter out properties missing price
-redfin_df <- redfin_df |> 
-  filter(!is.na(PRICE))
+# # Filter out properties missing price
+# redfin_df <- redfin_df |> 
+#   filter(!is.na(PRICE))
 
-# Parse the sold date and filter out sale before 2016
-redfin_df <- redfin_df %>%
-  mutate(sold_date_parsed = parse_date_time(`SOLD DATE`, orders = "B-d-Y")) %>% 
-  filter(is.na(sold_date_parsed) | year(sold_date_parsed) >= 2018)
+# # Parse the sold date and filter out sale before 2018
+# redfin_df <- redfin_df %>%
+#   mutate(sold_date_parsed = parse_date_time(`SOLD DATE`, orders = "B-d-Y")) %>% 
+#   filter(is.na(sold_date_parsed) | year(sold_date_parsed) >= 2018)
   
 ### Code to scrape assessed values for incorrectly priced homes(During download Redfin uses the last sale price which can be very old)
 
-# Flag homes with suspiciously low price
+# Flag homes with suspiciously low price or NA
 redfin_df <- redfin_df %>%
-  mutate(flag_low_price = PRICE < 650000)
+  mutate(flag_low_price = PRICE < 650000 | is.na(PRICE))
 
 # Initialize column to store scraped estimates
 redfin_df$assessed_or_estimate <- NA_real_
 
 # Scraper function
-get_assessed_value <- function(url) {
+get_redfin_estimate <- function(url) {
   page <- tryCatch({
     GET(url, add_headers(
       `User-Agent` = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     ))
   }, error = function(e) {
     message("GET failed: ", url)
-    return(NULL)
+    return(NA_real_)
   })
   
   if (!inherits(page, "response") || status_code(page) != 200) {
@@ -100,44 +101,40 @@ get_assessed_value <- function(url) {
   
   html <- tryCatch(read_html(page), error = function(e) {
     message("HTML parsing failed: ", url)
-    return(NULL)
+    return(NA_real_)
   })
   if (is.null(html)) return(NA_real_)
   
-  # Extract tables from the HTML
-  tables <- tryCatch(html_table(html, fill = TRUE), error = function(e) NULL)
-  if (is.null(tables)) return(NA_real_)
+  # Extract full text of the page
+  full_text <- html_text2(html)
   
-  # Search for a table that has "Assessed Value" in the names
-  for (tbl in tables) {
-    if ("Assessed Value" %in% names(tbl)) {
-      assessed_value_raw <- tbl[1, "Assessed Value"]
-      value_num <- str_extract(assessed_value_raw, "\\$[\\d,]+")
-      if (!is.na(value_num)) {
-        return(as.numeric(gsub("[\\$,]", "", value_num)))
-      }
-    }
+  # Find a pattern where a dollar value is followed closely by "Redfin Estimate"
+  pattern <- "\\$[\\d,]+(?=\\s*Redfin Estimate)"
+  match <- str_extract(full_text, pattern)
+  
+  if (!is.na(match)) {
+    return(as.numeric(gsub("[\\$,]", "", match)))
   }
   
   return(NA_real_)
 }
 # Run the function on flagged properties
-low_price_indices <- which(redfin_df$flag_low_price & !is.na(redfin_df$URL))
+low_price_indices <- which(redfin_df$flag_low_price & !is.na(redfin_df$URL) & is.na(redfin_df$assessed_or_estimate))
 for (i in low_price_indices) {
   url <- redfin_df$URL[i]
   message("Scraping ", i, " of ", length(low_price_indices), ": ", url)
-  redfin_df$assessed_or_estimate[i] <- get_assessed_value(url)
+  redfin_df$assessed_or_estimate[i] <- get_redfin_estimate(url)
   Sys.sleep(2.5)
 }
 
-# Replace low prices with scraped assessed values when available
+# Replace low prices with scraped Redfin Estimate values when available
 redfin_df <- redfin_df %>%
   mutate(PRICE = ifelse(flag_low_price & !is.na(assessed_or_estimate), assessed_or_estimate, PRICE))
-# Drop flagged properties where no assessed value was found 
+# Drop flagged properties where no Redfin Estimate was found 
 redfin_df <- redfin_df %>%
   filter(!(flag_low_price & is.na(assessed_or_estimate)))
 #remove unneeded columns
-redfin_df <- redfin_df %>% select(-flag_low_price, -assessed_or_estimate, -sold_date_parsed)
+redfin_df <- redfin_df %>% dplyr::select(-flag_low_price, -assessed_or_estimate)
 #####
 
 #plot the df to see where the addresses lie
@@ -153,7 +150,7 @@ batch_size <- 50
 n <- nrow(redfin_df)
 batches <- split(redfin_df, ceiling(seq_len(n) / batch_size))
 
-# Geocode batches with a pause between them
+# Geocode batches with a pause between them (this will take a while, don't let screen turn off)
 results <- map_dfr(batches, function(df_batch) {
   Sys.sleep(5)  # Pause between batches to avoid server overload
   tryCatch(
@@ -313,8 +310,6 @@ mapview(redfin_sf, zcol = "SALE TYPE", col.regions = c("blue", "green"))
 #Part 2 Scrapes the rental data
 #Note: you might have to change some of this because I have a PC and not MAC if you are a MAC user
 #See if we can get rental values
-library(httr)
-
 # Pick your URL
 url <- redfin_df$URL[1]
 
@@ -540,8 +535,11 @@ redfin_check <- redfin_df_no_rent |> #dplyr::select(-c(asset_ratio))|>
 redfin_df_no_rent <- redfin_df_no_rent |>
   mutate(rentalval = ifelse(!is.na(log_rent), exp(log_rent), NA_real_))
 
+#get rid of unneeded columns
 redfin_df_rent <- redfin_df_rent |> dplyr::select(-c(log_rent, "median_ageE", "whiteE", "blackE", "asianE", "hispanicE", "median_incomeE", "educationE", "unemploymentE"))
+redfin_df_no_rent <- redfin_df_no_rent |> dplyr::select(-c(log_rent, "median_ageE", "whiteE", "blackE", "asianE", "hispanicE", "median_incomeE", "educationE", "unemploymentE"))
 
+#recombine
 redfin_df_combine <- rbind(redfin_df_rent, redfin_df_no_rent) %>% filter(!is.na(rentalval)) %>% 
   dplyr::select(URL, rentalval) 
 
@@ -551,16 +549,18 @@ redfin_df <- redfin_df %>%
   mutate(rentalval = coalesce(rentalval_new, rentalval)) %>%
   dplyr::select(-rentalval_new)
 
-#Filter out remaining properties that still have rentalval == 0
+#Filter out remaining properties that are still missing rentalvals
 redfin_df <- redfin_df |> 
-  filter(!is.na(rentalval))
+  filter(!is.na(rentalval) & rentalval != 0)
 
-# Save the final dataframe to a CSV file in appropriate folder
 #redfin_df <- redfin_df |> rename(`ZIP OR POSTAL CODE`=ZIP.OR.POSTAL.CODE)
-write.csv(redfin_df, file = "data/silver_strand/redfin_df.csv", row.names = FALSE)
+
+####Save the final dataframe to a CSV file in appropriate folder!!!!!
 
 
-# 
+write.csv(redfin_df, file = "data/carpinteria/redfin_df.csv", row.names = FALSE)
+
+
 # 
 # # Loop through rows where rentalval == 0
 # for (i in which(redfin_sf$rentalval == 0)) {
