@@ -21,6 +21,7 @@ library(elevatr)
 library(jsonlite)
 library(sf)
 library(ggplot2)
+library(boot)
 library(tidycensus)
 library(tigris)
 library(rnaturalearth)
@@ -77,8 +78,10 @@ redfin_df <- redfin_df |>
 ### Code to scrape assessed values for incorrectly priced homes(During download Redfin uses the last sale price which can be very old)
 
 # Flag homes with suspiciously low price or NA
+# Going to use the average home price of the area as the check (eg. 1.3mil for Carpinteria in 2024 according to RedFin)
+# Will set it slightly above due to the heightened value of homes directly on the coast
 redfin_df <- redfin_df %>%
-  mutate(flag_low_price = PRICE < 650000 | is.na(PRICE))
+  mutate(flag_low_price = PRICE < 2000000 | is.na(PRICE))
 
 # Initialize column to store scraped estimates
 redfin_df$assessed_or_estimate <- NA_real_
@@ -169,6 +172,353 @@ redfin_sf <- st_as_sf(redfin_geocoded, coords = c("LONGITUDE...27", "LATITUDE...
 # Check if geocoding was successful
 mapview(redfin_sf, zcol = "SALE TYPE", col.regions = c("blue", "green"))
 
+
+#Part 2 Scrapes the rental data
+#Note: you might have to change some of this because I have a PC and not MAC if you are a MAC user
+#See if we can get rental values
+# Pick your URL
+url <- redfin_df$URL[1]
+
+# Use httr::GET to make a browser-like request
+page <- GET(
+  url,
+  add_headers(`User-Agent` = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+)
+
+# Then parse it with rvest
+html <- read_html(page)
+# Example: grab rental estimate
+rental <- html %>%
+  html_nodes(".estimate") %>%
+  html_text() %>%
+  stringr::str_extract("\\$[\\d,]+") %>%
+  stringr::str_remove_all("[$,]") %>%
+  as.numeric()
+
+
+# Initialize empty result list
+rental_estimates <- vector("numeric", length = nrow(redfin_df))
+
+# Loop through each URL (will take a while)
+for (i in 1:length(redfin_df$URL)) {
+  url <- redfin_df$URL[i]
+  success <- FALSE
+  attempt <- 1
+  
+  while (!success && attempt <= 2) {
+    try({
+      # Make GET request with browser user-agent
+      page <- GET(
+        url,
+        add_headers(`User-Agent` = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+      )
+      
+      # Check if the request succeeded
+      if (status_code(page) == 200) {
+        html <- read_html(page)
+        rental <- html %>%
+          html_nodes(".estimate") %>%
+          html_text() %>%
+          str_extract("\\$[\\d,]+") %>%
+          str_remove_all("[$,]") %>%
+          as.numeric()
+        
+        rental_estimates[i] <- rental
+        success <- TRUE
+      } else {
+        warning(paste("Failed at index", i, "- status:", status_code(page)))
+      }
+    }, silent = TRUE)
+    
+    if (!success && attempt == 1) {
+      Sys.sleep(5)  # wait before retry
+    }
+    
+    attempt <- attempt + 1
+  }
+  
+  # Optional: print progress
+  if (i %% 100 == 0) {
+    cat("Processed", i, "of", length(redfin_df$URL), "\n")
+  }
+}
+redfin_df$rentalval = rental_estimates
+# Convert data frame to an sf object
+redfin_sf <- st_as_sf(redfin_df, coords = c("LONGITUDE", "LATITUDE"), crs = 4326)
+
+# Get elevation data
+elevations <- get_elev_point(redfin_sf, src = "aws", z=14) # Note z=16 is 3m data 
+
+# Add elevation back to the original dataframe
+redfin_df$elevation <- elevations$elevation
+
+
+#save temporary csv to appropriate folder !!!!! make sure you put the appropriate name
+write.csv(redfin_df, file = "data/carpinteria/redfin_df.csv", row.names = FALSE)
+
+
+#Part 3 Regression to fill in missing data
+redfin_df_rent <- redfin_df |> filter(rentalval>0) |> mutate(asset_ratio = rentalval/PRICE)
+redfin_df_no_rent<- redfin_df |> filter(rentalval==0) |> mutate(asset_ratio = NA_real_)
+
+
+###First handle redfin_df_rent
+
+# 1. Download coastline shapefile as sf object
+coastline <- ne_download(scale = 10, type = "coastline", category = "physical", returnclass = "sf")
+
+# 2. Convert redfin_df_rent to an sf object (assuming lon/lat columns are named 'longitude' and 'latitude')
+redfin_sf <- st_as_sf(redfin_df_rent, coords = c("LONGITUDE", "LATITUDE"), crs = 4326)
+
+# 3. Project both to a planar CRS (Web Mercator for global coverage, EPSG:3857)
+redfin_proj <- st_transform(redfin_sf, crs = 3857)
+coastline_proj <- st_transform(coastline, crs = 3857)
+
+# 4. Calculate distances from each point to the nearest point on the coastline
+distances <- st_distance(redfin_proj, coastline_proj)
+min_distances <- apply(distances, 1, min)  # Minimum distance to coast for each observation
+
+# 5. Add result back to the original dataframe (as meters and kilometers)
+redfin_df_rent$distance_to_coast_meters <- as.numeric(min_distances)
+redfin_df_rent$distance_to_coast_km <- redfin_df_rent$distance_to_coast_meters / 1000
+# 5. Get ACS tract-level demographic data for California
+variables <- c(
+  median_age = "B01002_001",
+  white = "B02001_002",
+  black = "B02001_003",
+  asian = "B02001_005",
+  hispanic = "B03003_003",
+  median_income = "B19013_001",
+  education = "B15003_022",  # Bachelor's degree
+  unemployment = "B23025_005"
+)
+
+
+acs_data <- get_acs(
+  geography = "tract",
+  variables = variables,
+  state = "CA",
+  year = 2022,
+  geometry = TRUE,
+  output = "wide"
+)
+
+# 6. Transform ACS data to match redfin CRS
+acs_data <- st_transform(acs_data, crs = st_crs(redfin_sf))
+
+# 7. Spatial join: assign tract demographics to Redfin points
+redfin_joined <- st_join(redfin_sf, acs_data, join = st_within, left = TRUE)
+
+# First, drop the geometry to make `redfin_joined` a regular data frame
+redfin_with_acs <- st_drop_geometry(redfin_joined)
+
+# Identify the columns that came from ACS
+acs_columns <- c(
+  "median_ageE", "whiteE", "blackE", "asianE", "hispanicE", 
+  "median_incomeE", "educationE", "unemploymentE"
+)
+
+# Select only those columns plus the row identifier (assuming redfin_df_rent rows match 1:1)
+acs_data_to_add <- redfin_with_acs[, acs_columns]
+
+# Bind ACS data columns to the original redfin_df_rent
+redfin_df_rent <- bind_cols(redfin_df_rent, acs_data_to_add)
+
+
+### Now, repeat the process for redfin_df_no_rent ####
+
+# 1. Convert redfin_df_no_rent to an sf object (assuming lon/lat columns are named 'longitude' and 'latitude')
+redfin_sf <- st_as_sf(redfin_df_no_rent, coords = c("LONGITUDE", "LATITUDE"), crs = 4326)
+
+# 2. Project both to a planar CRS (Web Mercator for global coverage, EPSG:3857)
+redfin_proj <- st_transform(redfin_sf, crs = 3857)
+
+# 3. Calculate distances from each point to the nearest point on the coastline
+distances <- st_distance(redfin_proj, coastline_proj)
+min_distances <- apply(distances, 1, min)  # Minimum distance to coast for each observation
+
+# 4. Add result back to the original dataframe (as meters and kilometers)
+redfin_df_no_rent$distance_to_coast_meters <- as.numeric(min_distances)
+redfin_df_no_rent$distance_to_coast_km <- redfin_df_no_rent$distance_to_coast_meters / 1000
+
+
+# 5. Spatial join: assign tract demographics to Redfin points
+redfin_joined <- st_join(redfin_sf, acs_data, join = st_within, left = TRUE)
+
+# First, drop the geometry to make `redfin_joined` a regular data frame
+redfin_with_acs <- st_drop_geometry(redfin_joined)
+
+# Identify the columns that came from ACS
+acs_columns <- c(
+  "median_ageE", "whiteE", "blackE", "asianE", "hispanicE", 
+  "median_incomeE", "educationE", "unemploymentE"
+)
+
+# Select only those columns plus the row identifier (assuming redfin_df_rent rows match 1:1)
+acs_data_to_add <- redfin_with_acs[, acs_columns]
+
+# Bind ACS data columns to the original redfin_df_rent
+redfin_df_no_rent <- bind_cols(redfin_df_no_rent, acs_data_to_add)
+
+
+## Changing asset_ratio to log(rentval) for regression
+redfin_df_rent <- redfin_df_rent %>%
+  mutate(log_rent = log(rentalval))
+
+
+# Run the linear regression
+reg_model <- lm(log_rent ~ distance_to_coast_meters +  `SQUARE FEET` + BEDS + BATHS + `YEAR BUILT`,
+                data = redfin_df_rent)
+
+summary(reg_model)
+
+###
+# With Demographics (since its such a small area all the demographics are identical...so this model doesn't work)
+#reg_model2 <- lm(asset_ratio ~ distance_to_coast_meters +  `SQUARE FEET` + BEDS + BATHS + `YEAR BUILT` + median_ageE + blackE + asianE + hispanicE+median_incomeE+ educationE+unemploymentE,
+# data = redfin_df_rent)
+#summary(reg_model2)
+###
+
+# Bootstrap to quantify uncertainty in predictions
+set.seed(123) 
+n_boot <- 999 
+n <- nrow(redfin_df_rent)
+
+boot_preds <- matrix(NA, nrow = n, ncol = n_boot)
+
+for (b in 1:n_boot) {
+  # resample indices with replacement
+  boot_idx <- sample(1:n, size = n, replace = TRUE)
+  
+  # fit model on resampled data
+  boot_model <- lm(log_rent ~ distance_to_coast_meters + `SQUARE FEET` + BEDS + BATHS + `YEAR BUILT`,
+                   data = redfin_df_rent[boot_idx, ])
+  
+  # predict on *original* data so we can get distribution of predictions per property
+  boot_preds[, b] <- predict(boot_model, newdata = redfin_df_rent)
+}
+
+# Summarize bootstrap predictions (per property)
+boot_summary <- data.frame(
+  ADDRESS = redfin_df_rent$ADDRESS,
+  pred_mean   = rowMeans(boot_preds, na.rm = TRUE),
+  pred_lower  = apply(boot_preds, 1, quantile, probs = 0.025, na.rm = TRUE),
+  pred_upper  = apply(boot_preds, 1, quantile, probs = 0.975, na.rm = TRUE)
+)
+
+# Merge back to main df for downstream use
+redfin_df_rent <- dplyr::left_join(redfin_df_rent, boot_summary, by = "ADDRESS")
+###
+
+# Ensure the required predictor variables are present
+required_vars <- c("distance_to_coast_meters",  "SQUARE FEET", "BEDS", "BATHS", "YEAR BUILT", "median_ageE", "whiteE", "blackE", "asianE", "hispanicE", "median_incomeE", "educationE", "unemploymentE")
+
+# Create an NA column to hold predictions
+redfin_df_no_rent$log_rent <- NA
+
+# Find rows that have no missing values for predictors
+complete_rows <- complete.cases(redfin_df_no_rent[, required_vars])
+
+# Run prediction only on complete rows (using reg_model)
+redfin_df_no_rent$log_rent[complete_rows] <- predict(
+  reg_model,
+  newdata = redfin_df_no_rent[complete_rows, ]
+)
+redfin_check <- redfin_df_no_rent |> #dplyr::select(-c(asset_ratio))|>
+  filter(log_rent>0)
+
+redfin_df_no_rent <- redfin_df_no_rent |>
+  mutate(rentalval = ifelse(!is.na(log_rent), exp(log_rent), NA_real_))
+
+#get rid of unneeded columns
+redfin_df_rent <- redfin_df_rent |> dplyr::select(-c(log_rent, "median_ageE", "whiteE", "blackE", "asianE", "hispanicE", "median_incomeE", "educationE", "unemploymentE"))
+redfin_df_no_rent <- redfin_df_no_rent |> dplyr::select(-c(log_rent, "median_ageE", "whiteE", "blackE", "asianE", "hispanicE", "median_incomeE", "educationE", "unemploymentE"))
+
+#add placeholder prediction interval columns to redfin_df_no_rent
+redfin_df_no_rent <- redfin_df_no_rent %>%
+  mutate(pred_mean = NA_real_,
+         pred_lower = NA_real_,
+         pred_upper = NA_real_)
+
+#recombine
+redfin_df_combine <- rbind(redfin_df_rent, redfin_df_no_rent) %>% filter(!is.na(rentalval)) %>% 
+  dplyr::select(URL, rentalval) 
+
+# Merge back into original redfin_df
+redfin_df <- redfin_df %>%
+  left_join(redfin_df_combine, by = "URL", suffix = c("", "_new")) %>%
+  mutate(rentalval = coalesce(rentalval_new, rentalval)) %>%
+  dplyr::select(-rentalval_new)
+
+#Filter out remaining properties that are still missing rentalvals
+redfin_df <- redfin_df |> 
+  filter(!is.na(rentalval) & rentalval != 0)
+
+#redfin_df <- redfin_df |> rename(`ZIP OR POSTAL CODE`=ZIP.OR.POSTAL.CODE)
+
+####Save the final dataframe to a CSV file in appropriate folder!!!!!
+
+# non-spatial full cleaned frame
+write.csv(redfin_df, "data/carpinteria/redfin_df.csv", row.names = FALSE)
+
+# spatial version
+redfin_sf <- redfin_df %>%
+  st_as_sf(coords = c("LONGITUDE", "LATITUDE"), crs = 4326, remove = FALSE) %>%
+  rename(longitude = LONGITUDE, latitude = LATITUDE)
+
+write_csv(redfin_sf, "data/carpinteria/redfin_sf.csv")
+
+
+# 
+# # Loop through rows where rentalval == 0
+# for (i in which(redfin_sf$rentalval == 0)) {
+#   url <- redfin_sf$URL[i]
+#   success <- FALSE
+#   attempt <- 1
+#   rental <- 0
+#   
+#   while (!success && attempt <= 2) {
+#     try({
+#       # Make request with browser-like user agent
+#       page <- GET(
+#         url,
+#         add_headers(`User-Agent` = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+#       )
+#       
+#       if (status_code(page) == 200) {
+#         html <- read_html(page)
+#         rental <- html %>%
+#           html_nodes(".estimate") %>%
+#           html_text() %>%
+#           str_extract("\\$[\\d,]+") %>%
+#           str_remove_all("[$,]") %>%
+#           as.numeric()
+#         print(rental)
+#         # Only update if we get a valid (non-zero, non-NA) rental
+#         if (!is.na(rental) && rental > 0) {
+#           redfin_sf$rentalval[i] <- rental
+#           success <- TRUE
+#         }
+#       }
+#     }, silent = TRUE)
+#     
+#     if (!success && attempt == 1) {
+#       Sys.sleep(3)  # short pause before retry
+# 
+#       
+#       
+#           }
+#     
+#     attempt <- attempt + 1
+#   }
+#   
+#   # Track progress
+#   
+#   cat("Checked", i, "rows\n")
+#   
+# }
+# 
+# 
 ### Code in progress to scrape all off-market homes within a custom polygon ###
 
 # ### This function fetches Redfin data using a custom-drawn polygon and returns a formatted data frame
@@ -305,309 +655,3 @@ mapview(redfin_sf, zcol = "SALE TYPE", col.regions = c("blue", "green"))
 # # View final table
 # View(redfin_final)
 ####
-
-
-#Part 2 Scrapes the rental data
-#Note: you might have to change some of this because I have a PC and not MAC if you are a MAC user
-#See if we can get rental values
-# Pick your URL
-url <- redfin_df$URL[1]
-
-# Use httr::GET to make a browser-like request
-page <- GET(
-  url,
-  add_headers(`User-Agent` = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-)
-
-# Then parse it with rvest
-html <- read_html(page)
-# Example: grab rental estimate
-rental <- html %>%
-  html_nodes(".estimate") %>%
-  html_text() %>%
-  stringr::str_extract("\\$[\\d,]+") %>%
-  stringr::str_remove_all("[$,]") %>%
-  as.numeric()
-
-
-# Initialize empty result list
-rental_estimates <- vector("numeric", length = nrow(redfin_df))
-
-# Loop through each URL (will take a while)
-for (i in 1:length(redfin_df$URL)) {
-  url <- redfin_df$URL[i]
-  success <- FALSE
-  attempt <- 1
-  
-  while (!success && attempt <= 2) {
-    try({
-      # Make GET request with browser user-agent
-      page <- GET(
-        url,
-        add_headers(`User-Agent` = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-      )
-      
-      # Check if the request succeeded
-      if (status_code(page) == 200) {
-        html <- read_html(page)
-        rental <- html %>%
-          html_nodes(".estimate") %>%
-          html_text() %>%
-          str_extract("\\$[\\d,]+") %>%
-          str_remove_all("[$,]") %>%
-          as.numeric()
-        
-        rental_estimates[i] <- rental
-        success <- TRUE
-      } else {
-        warning(paste("Failed at index", i, "- status:", status_code(page)))
-      }
-    }, silent = TRUE)
-    
-    if (!success && attempt == 1) {
-      Sys.sleep(5)  # wait before retry
-    }
-    
-    attempt <- attempt + 1
-  }
-  
-  # Optional: print progress
-  if (i %% 100 == 0) {
-    cat("Processed", i, "of", length(redfin_df$URL), "\n")
-  }
-}
-redfin_df$rentalval = rental_estimates
-# Convert data frame to an sf object
-redfin_sf <- st_as_sf(redfin_df, coords = c("LONGITUDE", "LATITUDE"), crs = 4326)
-
-# Get elevation data
-elevations <- get_elev_point(redfin_sf, src = "aws", z=14) # Note z=16 is 3m data 
-
-# Add elevation back to the original dataframe
-redfin_df$elevation <- elevations$elevation
-
-
-
-
-#save temporary csv to appropriate folder
-write.csv(redfin_df, file = "data/silver_strand/redfin_df.csv", row.names = FALSE)
-
-
-
-
-#Part 3 Regression to fill in missing data
-redfin_df_rent <- redfin_df |> filter(rentalval>0) |> mutate(asset_ratio = rentalval/PRICE)
-redfin_df_no_rent<- redfin_df |> filter(rentalval==0) |> mutate(asset_ratio = NA_real_)
-
-
-###First handle redfin_df_rent
-
-# 1. Download coastline shapefile as sf object
-coastline <- ne_download(scale = 10, type = "coastline", category = "physical", returnclass = "sf")
-
-# 2. Convert redfin_df_rent to an sf object (assuming lon/lat columns are named 'longitude' and 'latitude')
-redfin_sf <- st_as_sf(redfin_df_rent, coords = c("LONGITUDE", "LATITUDE"), crs = 4326)
-
-# 3. Project both to a planar CRS (Web Mercator for global coverage, EPSG:3857)
-redfin_proj <- st_transform(redfin_sf, crs = 3857)
-coastline_proj <- st_transform(coastline, crs = 3857)
-
-# 4. Calculate distances from each point to the nearest point on the coastline
-distances <- st_distance(redfin_proj, coastline_proj)
-min_distances <- apply(distances, 1, min)  # Minimum distance to coast for each observation
-
-# 5. Add result back to the original dataframe (as meters and kilometers)
-redfin_df_rent$distance_to_coast_meters <- as.numeric(min_distances)
-redfin_df_rent$distance_to_coast_km <- redfin_df_rent$distance_to_coast_meters / 1000
-# 5. Get ACS tract-level demographic data for California
-variables <- c(
-  median_age = "B01002_001",
-  white = "B02001_002",
-  black = "B02001_003",
-  asian = "B02001_005",
-  hispanic = "B03003_003",
-  median_income = "B19013_001",
-  education = "B15003_022",  # Bachelor's degree
-  unemployment = "B23025_005"
-)
-
-acs_data <- get_acs(
-  geography = "tract",
-  variables = variables,
-  state = "CA",
-  year = 2022,
-  geometry = TRUE,
-  output = "wide"
-)
-
-# 6. Transform ACS data to match redfin CRS
-acs_data <- st_transform(acs_data, crs = st_crs(redfin_sf))
-
-# 7. Spatial join: assign tract demographics to Redfin points
-redfin_joined <- st_join(redfin_sf, acs_data, join = st_within, left = TRUE)
-
-# First, drop the geometry to make `redfin_joined` a regular data frame
-redfin_with_acs <- st_drop_geometry(redfin_joined)
-
-# Identify the columns that came from ACS
-acs_columns <- c(
-  "median_ageE", "whiteE", "blackE", "asianE", "hispanicE", 
-  "median_incomeE", "educationE", "unemploymentE"
-)
-
-# Select only those columns plus the row identifier (assuming redfin_df_rent rows match 1:1)
-acs_data_to_add <- redfin_with_acs[, acs_columns]
-
-# Bind ACS data columns to the original redfin_df_rent
-redfin_df_rent <- bind_cols(redfin_df_rent, acs_data_to_add)
-
-
-### Now, repeat the process for redfin_df_no_rent ####
-
-# 1. Convert redfin_df_no_rent to an sf object (assuming lon/lat columns are named 'longitude' and 'latitude')
-redfin_sf <- st_as_sf(redfin_df_no_rent, coords = c("LONGITUDE", "LATITUDE"), crs = 4326)
-
-# 2. Project both to a planar CRS (Web Mercator for global coverage, EPSG:3857)
-redfin_proj <- st_transform(redfin_sf, crs = 3857)
-
-# 3. Calculate distances from each point to the nearest point on the coastline
-distances <- st_distance(redfin_proj, coastline_proj)
-min_distances <- apply(distances, 1, min)  # Minimum distance to coast for each observation
-
-# 4. Add result back to the original dataframe (as meters and kilometers)
-redfin_df_no_rent$distance_to_coast_meters <- as.numeric(min_distances)
-redfin_df_no_rent$distance_to_coast_km <- redfin_df_no_rent$distance_to_coast_meters / 1000
-
-
-# 5. Spatial join: assign tract demographics to Redfin points
-redfin_joined <- st_join(redfin_sf, acs_data, join = st_within, left = TRUE)
-
-# First, drop the geometry to make `redfin_joined` a regular data frame
-redfin_with_acs <- st_drop_geometry(redfin_joined)
-
-# Identify the columns that came from ACS
-acs_columns <- c(
-  "median_ageE", "whiteE", "blackE", "asianE", "hispanicE", 
-  "median_incomeE", "educationE", "unemploymentE"
-)
-
-# Select only those columns plus the row identifier (assuming redfin_df_rent rows match 1:1)
-acs_data_to_add <- redfin_with_acs[, acs_columns]
-
-# Bind ACS data columns to the original redfin_df_rent
-redfin_df_no_rent <- bind_cols(redfin_df_no_rent, acs_data_to_add)
-
-
-## Changing asset_ratio to log(rentval) for regression
-redfin_df_rent <- redfin_df_rent %>%
-  mutate(log_rent = log(rentalval))
-
-
-# Run the linear regression
-reg_model <- lm(log_rent ~ distance_to_coast_meters +  `SQUARE FEET` + BEDS + BATHS + `YEAR BUILT`,
-                data = redfin_df_rent)
-
-summary(reg_model)
-
-# With Demographics (since its such a small area all the demographics are identical...so this model doesn't work)
-#reg_model2 <- lm(asset_ratio ~ distance_to_coast_meters +  `SQUARE FEET` + BEDS + BATHS + `YEAR BUILT` + median_ageE + blackE + asianE + hispanicE+median_incomeE+ educationE+unemploymentE,
-               # data = redfin_df_rent)
-
-#summary(reg_model2)
-
-# Ensure the required predictor variables are present
-required_vars <- c("distance_to_coast_meters",  "SQUARE FEET", "BEDS", "BATHS", "YEAR BUILT", "median_ageE", "whiteE", "blackE", "asianE", "hispanicE", "median_incomeE", "educationE", "unemploymentE")
-
-# Create an NA column to hold predictions
-redfin_df_no_rent$log_rent <- NA
-
-# Find rows that have no missing values for predictors
-complete_rows <- complete.cases(redfin_df_no_rent[, required_vars])
-
-# Run prediction only on complete rows (using reg_model)
-redfin_df_no_rent$log_rent[complete_rows] <- predict(
-  reg_model,
-  newdata = redfin_df_no_rent[complete_rows, ]
-)
-redfin_check <- redfin_df_no_rent |> #dplyr::select(-c(asset_ratio))|>
-  filter(log_rent>0)
-
-redfin_df_no_rent <- redfin_df_no_rent |>
-  mutate(rentalval = ifelse(!is.na(log_rent), exp(log_rent), NA_real_))
-
-#get rid of unneeded columns
-redfin_df_rent <- redfin_df_rent |> dplyr::select(-c(log_rent, "median_ageE", "whiteE", "blackE", "asianE", "hispanicE", "median_incomeE", "educationE", "unemploymentE"))
-redfin_df_no_rent <- redfin_df_no_rent |> dplyr::select(-c(log_rent, "median_ageE", "whiteE", "blackE", "asianE", "hispanicE", "median_incomeE", "educationE", "unemploymentE"))
-
-#recombine
-redfin_df_combine <- rbind(redfin_df_rent, redfin_df_no_rent) %>% filter(!is.na(rentalval)) %>% 
-  dplyr::select(URL, rentalval) 
-
-# Merge back into original redfin_df
-redfin_df <- redfin_df %>%
-  left_join(redfin_df_combine, by = "URL", suffix = c("", "_new")) %>%
-  mutate(rentalval = coalesce(rentalval_new, rentalval)) %>%
-  dplyr::select(-rentalval_new)
-
-#Filter out remaining properties that are still missing rentalvals
-redfin_df <- redfin_df |> 
-  filter(!is.na(rentalval) & rentalval != 0)
-
-#redfin_df <- redfin_df |> rename(`ZIP OR POSTAL CODE`=ZIP.OR.POSTAL.CODE)
-
-####Save the final dataframe to a CSV file in appropriate folder!!!!!
-
-
-write.csv(redfin_df, file = "data/carpinteria/redfin_df.csv", row.names = FALSE)
-
-
-# 
-# # Loop through rows where rentalval == 0
-# for (i in which(redfin_sf$rentalval == 0)) {
-#   url <- redfin_sf$URL[i]
-#   success <- FALSE
-#   attempt <- 1
-#   rental <- 0
-#   
-#   while (!success && attempt <= 2) {
-#     try({
-#       # Make request with browser-like user agent
-#       page <- GET(
-#         url,
-#         add_headers(`User-Agent` = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-#       )
-#       
-#       if (status_code(page) == 200) {
-#         html <- read_html(page)
-#         rental <- html %>%
-#           html_nodes(".estimate") %>%
-#           html_text() %>%
-#           str_extract("\\$[\\d,]+") %>%
-#           str_remove_all("[$,]") %>%
-#           as.numeric()
-#         print(rental)
-#         # Only update if we get a valid (non-zero, non-NA) rental
-#         if (!is.na(rental) && rental > 0) {
-#           redfin_sf$rentalval[i] <- rental
-#           success <- TRUE
-#         }
-#       }
-#     }, silent = TRUE)
-#     
-#     if (!success && attempt == 1) {
-#       Sys.sleep(3)  # short pause before retry
-# 
-#       
-#       
-#           }
-#     
-#     attempt <- attempt + 1
-#   }
-#   
-#   # Track progress
-#   
-#   cat("Checked", i, "rows\n")
-#   
-# }
-# 
-# 

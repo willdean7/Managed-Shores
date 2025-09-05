@@ -51,7 +51,32 @@ coastline <- st_boundary(california_boundary )
 
 # Define the bounding box (xmin, ymin, xmax, ymax) using the max and min coordinates of case study location
 #!!!!!!You can set this to be whatever area you want and it figure this out
-bbox <- st_bbox(c(xmin = -119.2241, ymin = 34.1478, xmax = -119.2138, ymax = 34.1583), crs = st_crs(4326))
+bbox <- st_bbox(c(xmin = -119.55, ymin = 34.38, xmax = -119.52, ymax = 34.41), crs = st_crs(4326))
+
+# Generate DEM for the case study area
+# Manually construct a polygon from bbox coordinates
+bbox_coords <- matrix(
+  c(
+    bbox["xmin"], bbox["ymin"],
+    bbox["xmin"], bbox["ymax"],
+    bbox["xmax"], bbox["ymax"],
+    bbox["xmax"], bbox["ymin"],
+    bbox["xmin"], bbox["ymin"]  # close the polygon
+  ),
+  ncol = 2,
+  byrow = TRUE
+)
+
+bbox_poly <- st_sf(
+  geometry = st_sfc(st_polygon(list(bbox_coords))),
+  crs = st_crs(4326)
+)
+
+# Generate DEM from polygon
+dem <- get_elev_raster(locations = bbox_poly, z = 14, src = "aws")
+
+# Save DEM to disk .... make sure to put in appropriate folder!!!
+writeRaster(dem, "data/carpinteria/dem.tif", overwrite = TRUE)
 
 # Crop the coastline data to the bounding box
 coastline_cropped <- st_crop(coastline, bbox)
@@ -196,25 +221,87 @@ for(i in 2000:2024){
   }
   wave_data<-rbind(wave_data, wave_tmp)
 }
-#gravity
-g=9.81
+
 #slope 
 slope = median(coastline_points_df$slope)
 #Using the run-up equation 
-wave_df <- wave_data |> filter(WVHT<98 & DPD<99)|>mutate(run_up=1.1*(0.35*slope*(WVHT*(g*DPD**2)/(2*pi))**0.5+0.5*(WVHT*(g*DPD**2)/(2*pi)*(0.563*(slope**2)+0.004))**0.5))
-max_wave_df<-wave_df|>group_by(YYYY)|>
-     summarize(run_up=max(run_up))
+#wave_df <- wave_data |> filter(WVHT<98 & DPD<99)|>mutate(run_up=1.1*(0.35*slope*(WVHT*(g*DPD**2)/(2*pi))**0.5+0.5*(WVHT*(g*DPD**2)/(2*pi)*(0.563*(slope**2)+0.004))**0.5))
 
-#plot for fun
-ggplot(max_wave_df, aes(x = YYYY, y = run_up)) +
-  geom_line() +
-  labs(title = "Annual Maximum Wave Run-Up at Silver Strand",
+# --- Monte Carlo Simulation for Uncertainty in Run-Up ---
+set.seed(123)   # for reproducibility
+n_sims <- 1000  # number of Monte Carlo draws
+
+# Parameters
+slope_mean <- median(coastline_points_df$slope)
+slope_sd   <- 0.0075  # midpoint of 0.005–0.01
+g <- 9.81
+
+# Clean buoy data first
+wave_df <- wave_data |> 
+  filter(WVHT < 98 & DPD < 99)
+
+# Monte Carlo: resample slope + buoy conditions
+mc_results <- map_dfr(1:n_sims, function(i) {
+  # draw slope with Gaussian error
+  slope_i <- rnorm(1, mean = slope_mean, sd = slope_sd)
+  slope_i <- max(slope_i, 0.0001)  # prevent negatives / zero slope
+  
+  # resample waves with replacement
+  wave_sample <- wave_df %>%
+    slice_sample(n = nrow(wave_df), replace = TRUE)
+  
+  # compute run-up for this simulation
+  run_up_i <- 1.1 * (
+    0.35 * slope_i * sqrt(wave_sample$WVHT * (g * wave_sample$DPD^2) / (2*pi)) +
+      0.5 * sqrt(wave_sample$WVHT * (g * wave_sample$DPD^2) / (2*pi) * (0.563 * slope_i^2 + 0.004))
+  )
+  
+  tibble(
+    sim = i,
+    YYYY = wave_sample$YYYY,
+    run_up = run_up_i
+  )
+})
+
+mc_yearly <- mc_results %>%
+  group_by(sim, YYYY) %>%
+  summarise(max_runup = max(run_up, na.rm = TRUE), .groups = "drop")
+
+# Distribution of annual maxima across simulations
+mc_summary <- mc_yearly %>%
+  group_by(YYYY) %>%
+  summarise(
+    runup_mean   = mean(max_runup, na.rm = TRUE),
+    runup_median = median(max_runup, na.rm = TRUE),
+    runup_p5     = quantile(max_runup, 0.05, na.rm = TRUE),
+    runup_p95    = quantile(max_runup, 0.95, na.rm = TRUE),
+    runup_max    = max(max_runup, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Deterministic run-up (using median slope, no resampling)
+det_wave_df <- wave_df |>
+  mutate(run_up = 1.1 * (
+    0.35 * slope * sqrt(WVHT * (g * DPD^2) / (2*pi)) +
+      0.5 * sqrt(WVHT * (g * DPD^2) / (2*pi) * (0.563 * slope^2 + 0.004))
+  ))
+
+# Deterministic annual maxima (for comparison)
+det_max_wave <- det_wave_df |> 
+  group_by(YYYY) |> 
+  summarise(run_up = max(run_up, na.rm = TRUE))
+
+# Plot with uncertainty ribbons
+ggplot(mc_summary, aes(x = YYYY, y = runup_mean)) +
+  geom_line(color = "blue") +
+  geom_ribbon(aes(ymin = runup_p5, ymax = runup_p95), alpha = 0.2, fill = "skyblue") +
+  labs(title = "Annual Max Wave Run-Up with Uncertainty",
        x = "Year", y = "Run-Up (m)") +
   theme_minimal()
 
-
-write.csv(max_wave_df, file = "data/silver_strand/run_up_data.csv", row.names = FALSE)
-
+# Save in same 24-row format
+write.csv(det_max_wave, file = "data/carpinteria/run_up_deterministic.csv", row.names = FALSE)
+write.csv(mc_summary,   file = "data/carpinteria/run_up_uncertainty.csv",   row.names = FALSE)
 
 ####OLD CODE DO NOT USE
 # #WBHT is defined as the shoaling-only estimte wave height at breaking

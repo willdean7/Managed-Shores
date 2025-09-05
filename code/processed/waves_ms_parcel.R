@@ -1,343 +1,141 @@
-#Jonah Danziger
-#Wave data
-rm(list=ls()) # clear the environment
+#Will Dean
+#Modification of the waves_ms.R script to be more robust and spatially accurate by linking 
+#wave run-up estimates to individual property parcels, rather than applying a uniform value across the coastline
 
-library(tidyverse)
-library(lubridate)
-library(janitor)
-library(rvest)
-library(parsedate)
-library(pracma)
-library(readxl)
-library(elevatr)
+rm(list=ls())
 library(sf)
-library(ggplot2)
 library(rnaturalearth)
-library(rnaturalearthdata)
+library(rnaturalearthhires)
 library(raster)
-library(lwgeom)
-library(nngeo)
-library(foreach)
-library(grid) 
+library(elevatr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(readr)
 
-
-
-#Estimating the Damage function
-#The first part is to estimate slope to get the alphas for the wave run up function
-# Download California shapefile
-
-# Download Natural Earth land data
-land <- ne_download(scale = 10, type = "land", category = "physical")
-
-# Download US state boundaries using rnaturalearthhires
-us_states <- ne_states(country = "United States of America", returnclass = "sf")
-# Filter for California
-california_boundary <- us_states[us_states$name == "California", ]
-
-# Transform the data to the same CRS
-land <- st_transform(land, crs = st_crs(4326))
-california_boundary <- st_transform(california_boundary, crs = st_crs(4326))
-
-# Clip the land data to the California boundary
-california_land <- st_intersection(land, california_boundary)
-# Plot the California shapefile with ggplot2
-ggplot(data = california_land) +
-  geom_sf(fill = "lightblue", color = "black") +
-  labs(title = "Map of California", 
-       caption = "Source: Natural Earth GITHUB") +
-  theme_minimal()
-# Download coastline data
-coastline <- st_boundary(california_boundary )
-
-# Define the bounding box (xmin, ymin, xmax, ymax) using the max and min coordinates of case study location
-#!!!!!!You can set this to be whatever area you want and it figure this out
-bbox <- st_bbox(c(xmin = -119.2241, ymin = 34.1478, xmax = -119.2138, ymax = 34.1583), crs = st_crs(4326))
-
-# Crop the coastline data to the bounding box
-coastline_cropped <- st_crop(coastline, bbox)
-
-# Define the resolution of the grid
-res <- 0.0025  # resolution in degrees
-
-
-# Create the grid
-grid <- expand.grid(
-  lon = seq(bbox['xmin'], bbox['xmax'], by = res),
-  lat = seq(bbox['ymin'], bbox['ymax'], by = res)
-)
-
-# Convert the grid to an sf object
-grid_sf <- st_as_sf(grid, coords = c("lon", "lat"), crs = 4326)
-
-# Plot the grid on top of the cropped coastline
-ggplot() +
-  geom_sf(data = coastline_cropped, color = "red") +
-  geom_sf(data = grid_sf, color = "blue", size = 0.5) +
-  labs(title = "Cropped Coastline with Grid",
-       caption = "Source: US Census Bureau TIGER/Line Shapefiles") +
-  theme_minimal()
-
-grid_sf<-st_intersection(grid_sf, california_land)
-#elev_df<-read_csv("C:/Users/jonah/Documents/Research/Wetland Restoration/huntingelev_df.csv")
-
-# Plot the grid on top of the cropped coastline
-ggplot() +
-  geom_sf(data = coastline_cropped, color = "red") +
-  geom_sf(data = grid_sf, color = "blue", size = 0.5) +
-  labs(title = "Cropped Coastline with Grid",
-       caption = "Source: US Census Bureau TIGER/Line Shapefiles") +
-  theme_minimal()
-
-# User-defined number of points to generate
-n_points <- 1000  # Change this to control how many points you want
-
-# Choose a projected CRS (e.g., Web Mercator)
+# Define region (adjust bbox as needed!!!)
+bbox <- st_bbox(c(xmin = -119.55, ymin = 34.38, xmax = -119.52, ymax = 34.41), crs = st_crs(4326))
+bbox_poly <- st_as_sfc(bbox) |> st_sf()
 projected_crs <- 3857
 
-# Densify the coastline (in lon/lat) for better geometry shape
+# Load parcels
+redfin_df <- read_csv("data/carpinteria/redfin_df.csv")  # correct path
+redfin_sf <- st_as_sf(redfin_df, coords = c("LONGITUDE", "LATITUDE"), crs = 4326, remove = FALSE)
+redfin_sf$parcel_id <- 1:nrow(redfin_sf)
+
+# Download coastline
+land <- ne_download(scale = 10, type = "land", category = "physical") |> st_transform(4326)
+us_states <- ne_states(country = "United States of America", returnclass = "sf") |> st_transform(4326)
+california_boundary <- us_states[us_states$name == "California", ]
+california_land <- st_intersection(land, california_boundary)
+coastline <- st_boundary(california_boundary)
+coastline_cropped <- st_crop(coastline, bbox)
+
+# Sample points along coastline & offset inland
+n_points <- 1000
 coastline_densified <- st_segmentize(coastline_cropped, dfMaxLength = 1000)
-
-# Convert to LINESTRING (if it's a collection)
 coastline_lines <- st_cast(coastline_densified, "LINESTRING")
-
-# Merge all lines
 coastline_merged <- st_union(coastline_lines)
+coastline_projected <- st_transform(coastline_merged, projected_crs)
+coastline_samples <- st_line_sample(coastline_projected, n = n_points, type = "regular") |>
+  st_cast("POINT") |> st_sf() |> st_transform(4326)
+coords <- st_coordinates(st_transform(coastline_samples, projected_crs))
+vectors <- diff(coords)
+normals <- matrix(NA, nrow = nrow(vectors), ncol = 2)
+for(i in 1:nrow(vectors)){
+  v <- vectors[i,]
+  norm <- sqrt(sum(v^2))
+  normals[i,] <- if(norm == 0) c(1,0) else c(-v[2], v[1])/norm
+}
+normals <- rbind(normals, normals[nrow(normals),])
+offset_coords <- coords + normals * 11
+inland_points <- st_as_sf(data.frame(x = offset_coords[,1], y = offset_coords[,2]), coords = c("x","y"), crs = projected_crs)
+inland_points <- st_transform(inland_points, 4326)
 
-# Reproject to a projected CRS to allow distance-based sampling
-coastline_projected <- st_transform(coastline_merged, crs = projected_crs)
+# Download DEM and get elevation
+dem_raster <- get_elev_raster(bbox_poly, z = 14, src = "aws")
+coastline_samples$coastal_elv <- raster::extract(dem_raster, coastline_samples)
+coastline_samples$near_elv <- raster::extract(dem_raster, inland_points)
+coastline_samples$slope <- abs(coastline_samples$near_elv - coastline_samples$coastal_elv) / 11
+coastline_samples <- coastline_samples |> 
+  filter(!is.na(coastal_elv), !is.na(near_elv), between(coastal_elv, -1, 10),
+         between(near_elv, -1, 10),
+         slope > 0, slope < 0.2) |> 
+  mutate(point_id = row_number())
 
-# Sample n regularly spaced points
-coastline_manypoints <- st_line_sample(coastline_projected, n = n_points, type = "regular")
+# Interpolate slope per parcel (weight by distance to coastal points)
+redfin_proj <- st_transform(redfin_sf, projected_crs)
+coast_proj <- st_transform(coastline_samples, projected_crs)
+dist_mat <- st_distance(redfin_proj, coast_proj)
 
-# Convert to POINTS and transform back to WGS84 (lat/lon)
-coastline_manypoints <- st_cast(coastline_manypoints, "POINT")
-coastline_manypoints <- st_transform(coastline_manypoints, crs = 4326)
+weighted_values <- function(dist_row, values, k = 5){
+  nearest <- order(dist_row)[1:k]
+  dists <- as.vector(dist_row[nearest])
+  weights <- 1/(dists+1e-6)
+  sum(values[nearest]*weights)/sum(weights)
+}
+redfin_sf$interp_slope <- apply(dist_mat, 1, weighted_values, values = coast_proj$slope, k = 5)
 
-# Create a dataframe with lat/lon
-coastline_points_df <- st_as_sf(coastline_manypoints) %>%
+# Load NOAA buoy data
+g <- 9.81
+wave_data <- data.frame()
+urlpt1 <- "https://www.ndbc.noaa.gov/view_text_file.php?filename=46053h"
+urlp2 <- ".txt.gz&dir=data/historical/stdmet/"
+for(year in 2000:2024){
+  url <- paste0(urlpt1, year, urlp2)
+  if(year >= 2007){
+    data <- read.table(url, sep = "", header = FALSE, fill = TRUE)
+    wave_tmp <- data %>%
+      dplyr::select(V1,V2,V3,V4,V9,V10,V15) %>%
+      rename(YYYY=V1, MM=V2, DD=V3, hh=V4, WVHT=V9, DPD=V10, WTMP=V15)
+  } else {
+    data <- read.table(url, sep = "", header = TRUE, fill = TRUE)
+    wave_tmp <- data %>%
+      dplyr::select(YYYY, MM, DD, hh, WVHT, DPD, WTMP)
+  }
+  wave_data <- bind_rows(wave_data, wave_tmp)
+}
+wave_df <- wave_data %>%
+  filter(WVHT < 98, DPD < 99) %>%
   mutate(
-    lon = st_coordinates(.)[, 1],
-    lat = st_coordinates(.)[, 2]
+    YYYY = as.integer(YYYY),
+    WVHT = as.numeric(WVHT),
+    DPD = as.numeric(DPD)
   )
 
-# Optional: convert to pure dataframe (drop sf geometry column if needed)
-coastline_points_df <- as.data.frame(coastline_points_df) |> st_as_sf()
+# Save annual run-up for each parcel into one csv
+results_list <- list()
 
-# Ensure coastline_points_df is in a projected CRS so we can measure meters
-coastline_projected <- st_transform(coastline_points_df, crs = 3857)
-
-# Convert to matrix of coordinates
-coords <- st_coordinates(coastline_projected)
-
-# Calculate direction vectors (tangents)
-vectors <- diff(coords)
-
-# Normalize and rotate each vector to get normal vectors (pointing roughly inland)
-normals <- apply(vectors, 1, function(v) {
-  v <- v / sqrt(sum(v^2))                # normalize
-  c(-v[2], v[1])                          # rotate 90 degrees (inland guess)
-})
-normals <- t(normals)
-
-# Repeat last normal so length matches number of points
-normals <- rbind(normals, normals[nrow(normals), ])
-
-# Offset the points inland by 10 meters
-offset_coords <- coords + normals * 11
-
-# Create inland points as sf POINT geometry
-inland_points <- st_as_sf(
-  data.frame(x = offset_coords[, 1], y = offset_coords[, 2]),
-  coords = c("x", "y"),
-  crs = 3857
-)
-
-# Transform back to WGS84
-inland_points_wgs84 <- st_transform(inland_points, crs = 4326)
-
-
-# Get elevation using elevatr (make sure elevatr is installed)
-in_elevation_data <- get_elev_point(locations = inland_points_wgs84,z=14, src = "aws")
-
-# Combine with coastal data if needed
-inland_with_elevation <- inland_points_wgs84 %>%
-  mutate(elevation = in_elevation_data$elevation)
-
-# Get elevation using elevatr (make sure elevatr is installed)
-elevation_data <- get_elev_point(locations = coastline_points_df,z=14, src = "aws")
-
-#Putting together the pieces for finding the slope
-coastline_points_df <- coastline_points_df|>
-  mutate(coastal_elv=elevation_data$elevation, near_elv = inland_with_elevation$elevation)|>
-  mutate(slope = abs((near_elv-coastal_elv)/11)) %>% filter(between(coastal_elv, -1, 10),
-                                                            between(near_elv, -1, 10)) %>% 
-  filter(slope > 0, slope < 0.2)
+for(i in 1:nrow(redfin_sf)){
+  slope_i <- redfin_sf$interp_slope[i]
+  # Calculate all run-ups for the parcel
+  run_up <- 1.1 * (
+    0.35 * slope_i * sqrt(wave_df$WVHT * (g * wave_df$DPD^2) / (2*pi)) +
+      0.5 * sqrt(wave_df$WVHT * (g * wave_df$DPD^2) / (2*pi) * (0.563 * slope_i^2 + 0.004))
+  )
+  temp_df <- data.frame(
+    parcel_id = redfin_sf$parcel_id[i],
+    address = redfin_sf$ADDRESS[i],
+    latitude = st_coordinates(redfin_sf)[i,2],
+    longitude = st_coordinates(redfin_sf)[i,1],
+    YYYY = wave_df$YYYY,
+    run_up = run_up
+  )
+  # For each year, keep only the max run-up
+  temp_max <- temp_df %>%
+    group_by(YYYY) %>%
+    summarise(
+      parcel_id = first(parcel_id),
+      address = first(address),
+      latitude = first(latitude),
+      longitude = first(longitude),
+      max_run_up = max(run_up, na.rm = TRUE),
+      .groups = "drop"
+    )
   
-
-###You can change the buoy that this is taken from 
-#Importing wave data
-#Retrieve data from this link https://www.ndbc.noaa.gov/obs.shtml
-urlpt1="https://www.ndbc.noaa.gov/view_text_file.php?filename=46053h" #Change the station number
-urlp2=".txt.gz&dir=data/historical/stdmet/"
-# Define the column names
-column_names <- c("#YY", "MM", "DD", "hh", "WVHT", "DPD", "WTMP")
-# Create an empty dataframe with these column names
-wave_data <- data.frame(matrix(ncol = length(column_names), nrow = 0))
-names(wave_data) <- column_names
-for(i in 2000:2024){
-  url<-paste0(urlpt1, i, urlp2)
-  print(i)
-
-  if (i>=2007){
-    data <- read.table(url, sep = "")
-
-    wave_tmp<-data|>dplyr::select(V1, V2,V3, V4, V9, V10,V15)|>
-      rename(YYYY=V1, MM=V2, DD=V3, hh=V4, WVHT=V9, DPD=V10, WTMP=V15)
-  }else{
-    data <- read.table(url, header = TRUE, sep = "", fill = TRUE)
-    wave_tmp<-data|>dplyr::select("YYYY", "MM", "DD", "hh", "WVHT", "DPD", "WTMP")
-  }
-  wave_data<-rbind(wave_data, wave_tmp)
+  results_list[[i]] <- temp_max
 }
-#gravity
-g=9.81
-#slope 
-slope = median(coastline_points_df$slope)
-#Using the run-up equation 
-#wave_df <- wave_data |> filter(WVHT<98 & DPD<99)|>mutate(run_up=1.1*(0.35*slope*(WVHT*(g*DPD**2)/(2*pi))**0.5+0.5*(WVHT*(g*DPD**2)/(2*pi)*(0.563*(slope**2)+0.004))**0.5))
-#max_wave_df<-wave_df|>group_by(YYYY)|>
-# summarize(run_up=max(run_up))
-### Doing pointwise run-up rather than uniform across the coastline
-# Read the saved CSV from your data prep step
-redfin_df <- read_csv("data/silver_strand/redfin_df.csv")
 
-# Convert redfin_df to an sf object with proper geometry
-redfin_sf <- st_as_sf(redfin_df, coords = c("LONGITUDE", "LATITUDE"), crs = 4326)
-# Clean wave data
-wave_df <- wave_data |> 
-  filter(WVHT < 98, DPD < 99)
-
-# Expand wave data across coastal points
-library(tidyr)
-wave_grid <- expand_grid(
-  point_id = seq_len(nrow(coastline_points_df)),
-  wave_df
-)
-
-# Attach slope from each coastal point
-wave_grid <- wave_grid |> 
-  mutate(slope = rep(coastline_points_df$slope, each = nrow(wave_df)))
-
-# Run-up at each point-year combo
-wave_grid <- wave_grid |>
-  mutate(run_up = 1.1 * (
-    0.35 * slope * sqrt(WVHT * (g * DPD^2) / (2 * pi)) +
-      0.5 * sqrt(WVHT * (g * DPD^2) / (2 * pi) * (0.563 * slope^2 + 0.004))
-  ))
-
-# Get max run-up per year and point
-max_runup_pts <- wave_grid |>
-  group_by(point_id, YYYY) |>
-  summarize(run_up = max(run_up, na.rm = TRUE), .groups = "drop")
-
-# Attach coordinates back
-coastal_runup_pts <- coastline_points_df |> 
-  mutate(point_id = row_number()) |>
-  left_join(max_runup_pts, by = "point_id")
-
-# Get parcel centroids
-parcel_centroids <- st_centroid(redfin_sf)
-
-coastal_unique <- coastal_runup_pts[!duplicated(coastal_runup_pts$point_id), ]
-
-# Find nearest coastal point to each parcel
-nearest_indices <- st_nearest_feature(parcel_centroids, coastal_unique)
-
-# Add point_id (nearest coastal point) to each parcel
-parcel_nearest_points <- parcel_centroids %>%
-  mutate(point_id = nearest_indices,
-         parcel_id = row_number(),
-         ADDRESS = redfin_df$ADDRESS,
-         URL = redfin_df$URL)
-
-# Join parcels with max_runup_pts (point_id, YYYY, run_up)
-parcel_runup_time_series <- parcel_nearest_points %>%
-  st_drop_geometry() %>%
-  left_join(max_runup_pts, by = "point_id")
-
-# Reattach geometry for each parcel
-parcel_runup_sf <- parcel_centroids %>%
-  mutate(parcel_id = row_number()) %>%
-  left_join(parcel_runup_time_series %>% dplyr::select(parcel_id, YYYY, run_up), by = "parcel_id")
-
-# Now group by geometry and compute max run-up
-max_runup <- parcel_runup_sf %>%
-  group_by(parcel_id) %>%
-  summarize(geometry = first(geometry),
-            max_run_up = max(run_up, na.rm = TRUE),
-            .groups = "drop") %>%
-  st_as_sf()
-
-#plot for fun
-parcel_runup_sf %>%
-  filter(parcel_id == 1) %>%
-  ggplot(aes(x = YYYY, y = run_up)) +
-  geom_line() +
-  labs(title = "Run-Up Over Time for Parcel 1",
-       x = "Year",
-       y = "Run-Up (m)") +
-  theme_minimal()
-
-slope_df <- coastal_runup_pts %>%
-  st_drop_geometry() %>%
-  dplyr::select(point_id, slope) %>%
-  distinct(point_id, .keep_all = TRUE)
-
-# Select relevant columns and convert back to dataframe
-runup_df <- parcel_runup_time_series %>%
-  left_join(slope_df, by = "point_id") %>%
-  left_join(
-    redfin_df %>%
-      mutate(parcel_id = row_number()) %>%
-      dplyr::select(parcel_id, `ADDRESS`, `URL`),
-    by = "parcel_id"
-  ) %>%
-  distinct(parcel_id, YYYY, .keep_all = TRUE) %>% 
-  dplyr::rename(ADDRESS = ADDRESS.y, URL = URL.y) %>%
-  dplyr::select(ADDRESS, URL, YYYY, run_up, slope)
-
-write.csv(runup_df, file = "data/silver_strand/run_up_data.csv", row.names = FALSE)
-
-
-
-####OLD CODE DO NOT USE
-# #WBHT is defined as the shoaling-only estimte wave height at breaking
-# #Kr is the refraction coefficient
-# #WSHT is defined as the estimated surf heights
-# wave_df <- wave_data|> mutate(WBHT=(WVHT**(4/5))*((1/sqrt(g))*(g*DPD/(4*pi))**(2/5))) |> #Estimated Wave Height at Breaking
-#   mutate(Kr=-0.0013*WBHT**2+0.1262*WBHT+0.3025) |> mutate(WSHT=WBHT*Kr) |> 
-#   filter(WVHT<99)
-# 
-# #Wave Run Up
-# #max wave data example
-# max_wave_df<-wave_df|>group_by(YYYY)|>
-#   filter(WVHT==max(WVHT))|>
-#   ungroup()
-# slope <- mean(nearest_df$slope)
-# wave_names<-c(colnames(nearest_df), colnames(max_wave_df))
-# max_day_wave<-max_wave_df[1,]
-# 
-# run_up_data_temp<-nearest_df|> mutate(run_up=8*max_day_wave$WSHT[1]*slope)
-# run_up_data_temp<-cbind(run_up_data_temp, max_day_wave)
-# 
-# 
-# run_up_data <- data.frame(matrix(ncol = length(column_names), nrow = 0))
-# for (i in 1:nrow(max_wave_df)){
-#   max_day_wave<-max_wave_df[i,]
-#   run_up_data_temp<-nearest_df|> mutate(run_up=8*max_day_wave$WSHT[1]*slope)|>
-#     cbind(max_day_wave)
-#   run_up_data<-rbind(run_up_data,run_up_data_temp)
-#   if (i%%10==0){
-#     print(paste("Progress is",i,"out of", nrow(max_wave_df)))
-#   }
-# }
+all_runups_df <- do.call(rbind, results_list)
+#Make sure to save to the right folder!!!
+write_csv(all_runups_df, file.path("data/carpinteria", "run_up_parcel.csv"))
