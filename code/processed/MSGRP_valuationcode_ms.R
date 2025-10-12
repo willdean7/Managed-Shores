@@ -110,6 +110,7 @@ length(missing_keys)  # should be 0
 
 # Define OPC 2024 scenarios
 ft_to_m <- 0.3048
+
 sea_level_data <- list(
   "Intermediate" = data.frame(
     time = c(0,10,20,30,40,50,60,70,80),
@@ -125,7 +126,10 @@ sea_level_data <- list(
   )
 )
 
-# Function to fit quadratic & predict
+# Function to fit quadratic & predict SLR for years 1:100
+# The OPC data points are decadal, so we fit a simple quadratic regression
+# (sea_level_rise ~ time + time^2) to approximate annual values from year 1–100.
+# This gives smooth SLR(t) curves in meters used later in the economic model.
 fit_slr_model <- function(df, years = 1:100) {
   df$timesquared <- df$time^2
   model <- lm(sea_level_rise ~ time + timesquared, data = df)
@@ -145,43 +149,47 @@ slr_all <- bind_rows(
 )
 
 # Named list of just the SLR vectors
+# Each element is a numeric vector of length 100 giving SLR(t) in meters
+# for t = 1..100. The dashboard dynamically selects one of these vectors
+# depending on the user’s chosen scenario ("Intermediate", "Intermediate_High",
+# or "High") when computing expected flood damages.
 slr_scenarios <- lapply(slr_preds, function(df) df$slr)
 
-## For the inundation map feature
-#first load dem from waves_ms.R
-dem <- rast("data/carpinteria/dem.tif") 
-
-# Pick median or max run-up (meters)
-runup_median <- median(shocks, na.rm=TRUE)
-runup_max <- max(shocks, na.rm=TRUE)
-
-# Years to plot
-years <- c(0,10,20,30,40,50,60,70,80)
-
-# Function to make inundation raster for a given scenario and year index
-make_inundation_raster <- function(scenario_name, year_idx, runup="median") {
-  slr <- slr_scenarios[[scenario_name]][year_idx]
-  runup_val <- ifelse(runup == "max", runup_max, runup_median)
-  t_wl <- slr + runup_val # total water level in meters
-  inundation <- dem < t_wl
-  inundation[!inundation] <- NA
-  return(inundation)
-}
-
-# Ensure output directory exists
-if(!dir.exists("data/carpinteria")) dir.create("data/carpinteria")
-if(!dir.exists("data/carpinteria/inundation")) dir.create("data/carpinteria/inundation")
-
-#loop to create inundation maps for each scenario and year
-scenarios <- c("Intermediate","Intermediate_High","High")
-years <- c(0,10,20,30,40,50,60,70,80)
-for (scen in scenarios) {
-  for (i in seq_along(years)) {
-    rast <- make_inundation_raster(scen, i, runup="median")
-    outname <- paste0("data/carpinteria/inundation_", scen, "_", years[i], ".tif")
-    terra::writeRaster(rast, outname, overwrite=TRUE)
-  }
-}
+# ## For the inundation map feature
+# #first load dem from waves_ms.R
+# dem <- rast("data/carpinteria/dem.tif") 
+# 
+# # Pick median or max run-up (meters)
+# runup_median <- median(shocks, na.rm=TRUE)
+# runup_max <- max(shocks, na.rm=TRUE)
+# 
+# # Years to plot
+# years <- c(0,10,20,30,40,50,60,70,80)
+# 
+# # Function to make inundation raster for a given scenario and year index
+# make_inundation_raster <- function(scenario_name, year_idx, runup="median") {
+#   slr <- slr_scenarios[[scenario_name]][year_idx]
+#   runup_val <- ifelse(runup == "max", runup_max, runup_median)
+#   t_wl <- slr + runup_val # total water level in meters
+#   inundation <- dem < t_wl
+#   inundation[!inundation] <- NA
+#   return(inundation)
+# }
+# 
+# # Ensure output directory exists
+# if(!dir.exists("data/carpinteria")) dir.create("data/carpinteria")
+# if(!dir.exists("data/carpinteria/inundation")) dir.create("data/carpinteria/inundation")
+# 
+# #loop to create inundation maps for each scenario and year
+# scenarios <- c("Intermediate","Intermediate_High","High")
+# years <- c(0,10,20,30,40,50,60,70,80)
+# for (scen in scenarios) {
+#   for (i in seq_along(years)) {
+#     rast <- make_inundation_raster(scen, i, runup="median")
+#     outname <- paste0("data/carpinteria/inundation_", scen, "_", years[i], ".tif")
+#     terra::writeRaster(rast, outname, overwrite=TRUE)
+#   }
+# }
 
 #Estimate depth parameters
 # Data
@@ -193,7 +201,7 @@ depth_df <- data.frame(
                 0.30, 0.33, 0.36, 0.38, 0.39, 0.39)
 )
 
-# Fit logistic function to model damage as a function of flood depth
+# Fit logistic function to model damage as a function of flood depth 
 logistic_nls <- nls(
   damagepct ~ a / (1 + exp(-b * (depth - d))),
   data = depth_df,
@@ -207,14 +215,14 @@ depth_params <- coef(logistic_nls) #This will flex with whatever depths you end 
 strdamagefxn <- function(depthparams, sealevel, elevation, strval){
   num_rows=length(elevation)
   # Calculate the depth (sealevel - elevation)
-  depth = (sealevel - elevation) #*3 # This accounts for meters to feet
+  depth = (sealevel - elevation) 
   # Predict values using the logistic_nls
   a = depthparams[1]
   b = depthparams[2]
   d = depthparams[3]
   #applies damage parameters to real structure values 
   damage_percent = a / (1 + exp(-b * (depth - d)))
-  strdamage <- damage_percent * strval ###Changed from str_view_all to strval
+  strdamage <- damage_percent * strval
   return(strdamage)
 }
 
@@ -473,17 +481,17 @@ optimalStoppingDate_parcel <- function(bigT, depthparams, sealevelbase, parcel_s
 }
 
 # Calculate optimal retreat year for each property
-retreat_years_df <- purrr::map_dfr(names(slr_scenarios), function(scen) {
-  optimalStoppingDate(
-    bigT         = 100,
-    depthparams  = depth_params,
-    sealevelbase = slr_scenarios[[scen]],  
-    parcel_shocks       = parcel_shocks,                  
-    realestate   = redfin_sf,
-    beta         = 0.97,
-    scenario_name = scen
-  )
-})
+# retreat_years_df <- purrr::map_dfr(names(slr_scenarios), function(scen) {
+#   optimalStoppingDate(
+#     bigT         = 100,
+#     depthparams  = depth_params,
+#     sealevelbase = slr_scenarios[[scen]],  
+#     parcel_shocks = parcel_shocks,                  
+#     realestate   = redfin_sf,
+#     beta         = 0.97,
+#     scenario_name = scen
+#   )
+# })
 
 #using parcel runup data
 retreat_years_df <- purrr::map_dfr(names(slr_scenarios), function(scen) {
@@ -523,7 +531,9 @@ mapview(
 # First we need to extract coordinates before saving 
 coords <- st_coordinates(redfin_sf)
 redfin_no_geom <- st_set_geometry(redfin_sf, NULL)
-redfin_sf_clean <- cbind(redfin_no_geom, coords)
+redfin_sf_clean <- cbind(redfin_no_geom, 
+                         longitude = coords[,1], 
+                         latitude = coords[,2])
 
 # Save with proper column names
 write.csv(redfin_sf_clean, "data/carpinteria/redfin_sf.csv", row.names = FALSE)

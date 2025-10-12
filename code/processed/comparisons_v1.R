@@ -6,31 +6,129 @@ library(leaflet)
 library(DT)
 library(plotly)
 library(dplyr)
+library(janitor)
+library(ggplot2)
+library(scales)
 library(sf)
 library(units)
 
 # Read vulnerability metrics script
 source("code/processed/calc_vulnerability_metrics.R")
 
-redfin_sf <- readr::read_csv("data/carpinteria/redfin_sf.csv") %>%
-  st_as_sf(coords = c("longitude", "latitude"), crs = 4326) %>%
-  calc_vulnerability_metrics() %>%
-  mutate(
-    id = row_number(),
-    scenario = case_when(
-      scenario == "Intermediate" ~ "Base Intermediate",
-      scenario == "Intermediate_High" ~ "Base Intermediate High",
-      scenario == "High" ~ "Base High",
+redfin_sf <- readr::read_csv("data/carpinteria/redfin_sf.csv") |> ####make sure to change the folder to appropriate location
+  dplyr::mutate(
+    ADDRESS = trimws(tolower(ADDRESS))  # normalize for joining
+  ) |>
+  sf::st_as_sf(coords = c("longitude", "latitude"), crs = 4326) |>
+  calc_vulnerability_metrics() |>
+  dplyr::mutate(
+    id = dplyr::row_number(),
+    # Harmonize scenario labels to match UI control
+    scenario = dplyr::case_when(
+      scenario == "Intermediate"        ~ "Intermediate",
+      scenario == "Intermediate_High"   ~ "Intermediate High",
+      scenario == "High"                ~ "High",
       TRUE ~ scenario
     ),
+    # Friendly labels for facets/legends
     retreat_category_label = dplyr::case_when(
-      retreat_category == "0-10 years" ~ "Immediate Retreat (0-10 years)",
-      retreat_category == "10-25 years" ~ "Early Retreat (10-25 years)",
-      retreat_category == "25-50 years" ~ "Mid-term Retreat (25-50 years)",
+      retreat_category == "0-10 years"   ~ "Immediate Retreat (0-10 years)",
+      retreat_category == "10-25 years"  ~ "Early Retreat (10-25 years)",
+      retreat_category == "25-50 years"  ~ "Mid-term Retreat (25-50 years)",
       retreat_category == "50-100 years" ~ "Late Retreat (50-100 years)",
-      retreat_category == ">100 years" ~ "Delayed Retreat"
+      retreat_category == ">100 years"   ~ "Delayed Retreat",
+      TRUE ~ as.character(retreat_category)
     )
   )
+
+## Parcel run-up history (annual maxima per parcel)
+runup_parcel <- readr::read_csv("data/carpinteria/run_up_parcel.csv") |>
+  janitor::clean_names() |>
+  dplyr::rename(year = yyyy, run_up = max_run_up) |>
+  dplyr::mutate(
+    parcel_id = as.character(parcel_id),
+    address   = trimws(tolower(address))
+  )
+
+# address -> parcel_id lookup (deduped)
+runup_lookup <- runup_parcel |>
+  dplyr::select(address, parcel_id) |>
+  dplyr::distinct()
+
+# attach parcel_id to the points
+redfin_sf <- redfin_sf |>
+  dplyr::left_join(runup_lookup, by = c("ADDRESS" = "address")) |>
+  dplyr::mutate(parcel_id = as.character(parcel_id))
+
+message("Missing parcel_id rows: ", sum(is.na(redfin_sf$parcel_id)))
+
+# parcel_id -> vector of run-up values (keep finite only)
+parcel_runup_clean <- runup_parcel |>
+  dplyr::mutate(run_up = ifelse(is.finite(run_up), run_up, NA_real_)) |>
+  tidyr::drop_na(run_up)
+
+parcel_runup_list <- split(
+  parcel_runup_clean$run_up,
+  as.character(parcel_runup_clean$parcel_id)
+)
+
+## OPC 2024 SLR scenarios -> quadratic fits -> 100-year vectors
+ft_to_m <- 0.3048
+make_scenario_df <- function(feet_vec) {
+  data.frame(
+    time = c(0,10,20,30,40,50,60,70,80),
+    sea_level_rise = feet_vec * ft_to_m
+  )
+}
+
+sea_level_data <- list(
+  "Intermediate"      = make_scenario_df(c(0, 0.4, 0.6, 0.8, 1.1, 1.4, 1.8, 2.4, 3.1)),
+  "Intermediate High" = make_scenario_df(c(0, 0.4, 0.7, 1.0, 1.5, 2.2, 3.0, 3.9, 4.9)),
+  "High"              = make_scenario_df(c(0, 0.4, 0.8, 1.2, 2.0, 3.0, 4.1, 5.4, 6.6))
+)
+
+fit_slr_model <- function(df, years = 1:100) {
+  df$timesquared <- df$time^2
+  m  <- stats::lm(sea_level_rise ~ time + timesquared, data = df)
+  nd <- data.frame(time = years, timesquared = years^2)
+  as.numeric(stats::predict(m, newdata = nd))
+}
+
+# named list: each element is a numeric vector (length 100, meters)
+slr_scenarios <- lapply(sea_level_data, fit_slr_model)
+
+## Depth-damage curve & helpers
+depth_df <- data.frame(
+  depth = c(-8,-7,-6,-5,-4,-3,-2,-1,0,1,2,3,4,5,6,7,8,9),
+  damagepct = c(0,0,0,0,0,0,0,0.01,0.07,0.14,0.20,0.26,0.30,0.33,0.36,0.38,0.39,0.39)
+)
+
+logistic_nls <- nls(
+  damagepct ~ a/(1 + exp(-b * (depth - d))),
+  data = depth_df,
+  start = list(a = 0.4, b = 1, d = 2)
+)
+depth_params <- setNames(coef(logistic_nls), c("a","b","d"))
+
+npvrentfxn <- function(littleT, bigT, rentvalues, beta) {
+  n      <- bigT - littleT + 1
+  betas  <- beta^(1:n)
+  rentsT <- outer(rentvalues, rep(1, n))
+  as.vector(rentsT %*% betas)
+}
+
+# Expected damages from t..bigT for a single parcel (supports scalar or vector shocks)
+expdamagefxn_parcel_once <- function(littleT, bigT, depthparams, slr, shocks_vec, elev, strval, beta) {
+  yrs       <- littleT:bigT
+  sea_part  <- slr[yrs]                              # length n
+  shocks    <- as.numeric(shocks_vec)                # length k (k can be 1)
+  depth_mat <- outer(sea_part, shocks, `+`) - elev   # n x k
+  
+  a <- depthparams[["a"]]; b <- depthparams[["b"]]; d <- depthparams[["d"]]
+  dmg_frac   <- a / (1 + exp(-b * (depth_mat - d)))
+  exp_dmg_t  <- strval * rowMeans(pmax(dmg_frac, 0), na.rm = TRUE)  # length n
+  sum(exp_dmg_t * beta^(1:length(yrs)))
+}
 
 retreat_dashboard <- function(enhanced_data) {
   
@@ -46,15 +144,9 @@ retreat_dashboard <- function(enhanced_data) {
       hr(),
       selectInput(
         "scenario_choice", "Select SLR Scenario:",
-        choices = c("Base Intermediate", "Base Intermediate High", "Base High"),
-        selected = "Base Intermediate"
-      ),
-      
-      selectInput(
-        "year_choice", "Select Year:",
-        choices = c(0, 10, 20, 30, 40, 50, 60, 70, 80),
-        selected = 10
-      )
+        choices = c("Intermediate", "Intermediate High", "High"),
+        selected = "Intermediate"
+      ) 
     ),
     dashboardBody(
       withMathJax(),
@@ -63,9 +155,18 @@ retreat_dashboard <- function(enhanced_data) {
                 fluidRow(
                   box(title = "Click any property to compare with neighbors", status = "primary", solidHeader = TRUE, width = 8,
                       leafletOutput("interactive_map", height = "600px")),
-                  box(title = "Selected Property Details", status = "info", solidHeader = TRUE, width = 4,
-                      verbatimTextOutput("selected_info"), hr(), h4("Nearest Neighbors:"),
-                      DT::dataTableOutput("neighbor_table"))
+                  # box(title = "Selected Property Details", status = "info", solidHeader = TRUE, width = 4,
+                  #     verbatimTextOutput("selected_info"), hr(), h4("Nearest Neighbors:"),
+                  #     DT::dataTableOutput("neighbor_table")),
+                  box(
+                    title = "Selected Property Details", status = "info", solidHeader = TRUE, width = 4,
+                    verbatimTextOutput("selected_info"),
+                    hr(),
+                    h4("Why This Retreat Year?"),
+                    plotOutput("npv_damage_plot", height = "250px"),
+                    p(em("Green: NPV of rent from year t to 100;  Red: expected flood damages (discounted) from year t to 100.")),
+                    p(em("Dashed line = optimal retreat year (T*)."))
+                  )
                 )
         ),
         tabItem(tabName = "risk",
@@ -301,20 +402,112 @@ retreat_dashboard <- function(enhanced_data) {
         "Click a property on the map to see details"
       }
     })
+    output$npv_damage_plot <- renderPlot({
+      prop <- selected_property()
+      req(prop)
+      
+      # Fixed params
+      beta  <- 0.97
+      bigT  <- 100L
+      years <- 1:bigT
+      
+      # ---- Get run-up history for this parcel (empirical samples) ----
+      pid <- as.character(prop$parcel_id[1])
+      
+      msg_plot <- function(txt) {
+        ggplot() +
+          annotate("text", x = 0.5, y = 0.5, label = txt, size = 5) +
+          theme_void()
+      }
+      
+      if (is.na(pid) || !pid %in% names(parcel_runup_list)) {
+        return(msg_plot("No run-up history matched to this parcel (missing parcel_id join)."))
+      }
+      
+      shocks_vec <- parcel_runup_list[[pid]]
+      if (is.null(shocks_vec) || length(shocks_vec) == 0) {
+        return(msg_plot("No run-up history for this parcel."))
+      }
+      
+      shocks_vec <- shocks_vec[is.finite(shocks_vec)]
+      if (length(shocks_vec) == 0) {
+        return(msg_plot("Run-up series is empty after removing NAs/Inf."))
+      }
+      
+      # ---- SLR scenario (meters) ----
+      scen    <- as.character(req(input$scenario_choice))
+      slr_vec <- slr_scenarios[[scen]]
+      if (is.null(slr_vec) || length(slr_vec) < bigT) {
+        return(msg_plot("SLR vector shorter than horizon; check scenario fit."))
+      }
+      
+      # ---- Parcel inputs ----
+      elev <- as.numeric(prop$elevation)
+      strv <- as.numeric(prop$strval)
+      rent <- as.numeric(prop$rent)
+      
+      # ---- NPV of rents from t..100 ----
+      npv_rent_t <- vapply(
+        years,
+        function(t) npvrentfxn(t, bigT, rentvalues = rent, beta = beta),
+        numeric(1)
+      )
+      
+      # ---- Expected damages from t..100 using empirical run-up ----
+      npv_dmg_t <- vapply(
+        years,
+        function(t) expdamagefxn_parcel_once(
+          littleT = t, bigT = bigT,
+          depthparams = depth_params,
+          slr = slr_vec,
+          shocks_vec = shocks_vec,
+          elev = elev,
+          strval = strv,
+          beta = beta
+        ),
+        numeric(1)
+      )
+      
+      t_star <- suppressWarnings(as.numeric(prop$retreat_year[1]))
+      draw_vline <- is.finite(t_star) && t_star >= 1 && t_star <= bigT
+      
+      df_plot <- data.frame(
+        year        = years,
+        npv_rent    = as.numeric(npv_rent_t),
+        npv_damages = as.numeric(npv_dmg_t)
+      )
+      
+      p <- ggplot(df_plot, aes(year)) +
+        geom_line(aes(y = npv_rent),    size = 1.1, color = "#1b7837") +
+        geom_line(aes(y = npv_damages), size = 1.1, color = "#a50026") +
+        scale_y_continuous(labels = scales::label_dollar(
+          scale_cut = scales::cut_short_scale()
+        )) +
+        labs(
+          x = "Decision year t",
+          y = "NPV from t..100",
+          title = paste0("NPV of Staying vs. Expected Damages — ", scen)
+        ) +
+        theme_minimal(base_size = 12)
+      
+      if (draw_vline) p <- p + geom_vline(xintercept = t_star, linetype = "dashed")
+      
+      p
+    })
     
-    output$neighbor_table <- DT::renderDataTable({
-      req(neighbors())
-      neighbors() %>%
-        st_drop_geometry() %>%
-        dplyr::select(
-          Address = ADDRESS,
-          `Retreat Year` = retreat_year,
-          `Risk Level` = risk_level,
-          `Elevation (m)` = elevation,
-          `Distance (m)` = distance_m
-        ) %>%
-        mutate(across(where(is.numeric), round, 1))
-    }, options = list(pageLength = 5, dom = 't'))
+    # output$neighbor_table <- DT::renderDataTable({
+    #   req(neighbors())
+    #   neighbors() %>%
+    #     st_drop_geometry() %>%
+    #     dplyr::select(
+    #       Address = ADDRESS,
+    #       `Retreat Year` = retreat_year,
+    #       `Risk Level` = risk_level,
+    #       `Elevation (m)` = elevation,
+    #       `Distance (m)` = distance_m
+    #     ) %>%
+    #     mutate(across(where(is.numeric), round, 1))
+    # }, options = list(pageLength = 5, dom = 't'))
     
     output$rent_structure_plot <- renderPlotly({
       ratio_data <- scenario_data()$rent_to_structure_ratio
@@ -419,8 +612,11 @@ retreat_dashboard <- function(enhanced_data) {
     })
     
     output$avg_elevation_diff <- renderValueBox({
-      immediate <- scenario_data() %>% filter(retreat_category_label == "Immediate Retreat")
-      delayed  <- scenario_data() %>% filter(retreat_category_label == "Delayed Retreat")
+      immediate <- scenario_data() %>%
+        filter(retreat_category_label == "Immediate Retreat (0-10 years)")
+      
+      delayed <- scenario_data() %>%
+        filter(retreat_category_label == "Delayed Retreat")
       
       if (nrow(immediate) == 0 || nrow(delayed) == 0) {
         diff <- NA

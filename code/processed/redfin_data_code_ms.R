@@ -32,6 +32,7 @@ library(lwgeom)
 library(nngeo)
 library(readr)
 library(httr)
+library(digest)
 
 #Part 1 Concatenate into a unified dataset
 #Choose your working directory/location of interest
@@ -63,8 +64,8 @@ redfin_df <- redfin_df |>
                                  "Townhouse", "Multi-Family (2-4 Unit)"))
 
 # Deduplicate by address (best proxy for same property)
-redfin_df <- redfin_df |> 
-  distinct(ADDRESS, .keep_all = TRUE)
+redfin_df <- redfin_df %>% 
+  distinct(ADDRESS, `PROPERTY TYPE`, .keep_all = TRUE)
 
 # # Filter out properties missing price
 # redfin_df <- redfin_df |> 
@@ -167,7 +168,7 @@ results <- map_dfr(batches, function(df_batch) {
 
 # Convert to spatial object
 redfin_geocoded <- results
-redfin_sf <- st_as_sf(redfin_geocoded, coords = c("LONGITUDE...27", "LATITUDE...26"), crs = 4326)
+redfin_sf <- st_as_sf(redfin_geocoded, coords = c("LONGITUDE", "LATITUDE"), crs = 4326)
 
 # Check if geocoding was successful
 mapview(redfin_sf, zcol = "SALE TYPE", col.regions = c("blue", "green"))
@@ -179,32 +180,14 @@ mapview(redfin_sf, zcol = "SALE TYPE", col.regions = c("blue", "green"))
 # Pick your URL
 url <- redfin_df$URL[1]
 
-# Use httr::GET to make a browser-like request
-page <- GET(
-  url,
-  add_headers(`User-Agent` = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-)
-
-# Then parse it with rvest
-html <- read_html(page)
-# Example: grab rental estimate
-rental <- html %>%
-  html_nodes(".estimate") %>%
-  html_text() %>%
-  stringr::str_extract("\\$[\\d,]+") %>%
-  stringr::str_remove_all("[$,]") %>%
-  as.numeric()
-
-
 # Initialize empty result list
 rental_estimates <- vector("numeric", length = nrow(redfin_df))
 
 # Loop through each URL (will take a while)
-for (i in 1:length(redfin_df$URL)) {
+for (i in seq_along(redfin_df$URL)) {
   url <- redfin_df$URL[i]
   success <- FALSE
   attempt <- 1
-  
   while (!success && attempt <= 2) {
     try({
       # Make GET request with browser user-agent
@@ -216,32 +199,26 @@ for (i in 1:length(redfin_df$URL)) {
       # Check if the request succeeded
       if (status_code(page) == 200) {
         html <- read_html(page)
-        rental <- html %>%
-          html_nodes(".estimate") %>%
-          html_text() %>%
-          str_extract("\\$[\\d,]+") %>%
-          str_remove_all("[$,]") %>%
-          as.numeric()
-        
-        rental_estimates[i] <- rental
+        # Extract full page text
+        html_text_full <- html %>% html_text()
+        # Search for "Est. $X per month"
+        rental_match <- str_extract(html_text_full, "Est\\. \\$[\\d,]+ per month")
+        # Extract dollar value and convert to numeric, else NA if not found
+        rental_val <- str_extract(rental_match, "\\$[\\d,]+")
+        rental_estimates[i] <- if (!is.na(rental_val)) as.numeric(str_remove_all(rental_val, "[$,]")) else NA
         success <- TRUE
       } else {
         warning(paste("Failed at index", i, "- status:", status_code(page)))
       }
     }, silent = TRUE)
     
-    if (!success && attempt == 1) {
-      Sys.sleep(5)  # wait before retry
-    }
-    
+    if (!success && attempt == 1) Sys.sleep(5)
     attempt <- attempt + 1
   }
-  
-  # Optional: print progress
-  if (i %% 100 == 0) {
-    cat("Processed", i, "of", length(redfin_df$URL), "\n")
-  }
+  # Print progress every 100 URLs
+  if (i %% 100 == 0) cat("Processed", i, "of", length(redfin_df$URL), "\n")
 }
+
 redfin_df$rentalval = rental_estimates
 # Convert data frame to an sf object
 redfin_sf <- st_as_sf(redfin_df, coords = c("LONGITUDE", "LATITUDE"), crs = 4326)
@@ -252,15 +229,29 @@ elevations <- get_elev_point(redfin_sf, src = "aws", z=14) # Note z=16 is 3m dat
 # Add elevation back to the original dataframe
 redfin_df$elevation <- elevations$elevation
 
+#assign likely hazard type
+#if parcel elevation is above 7m it will be evaluated for bluff hazard, otherwise flood hazard
+redfin_df$hazard_type <- ifelse(redfin_df$elevation > 7, "bluff", "flood")
 
 #save temporary csv to appropriate folder !!!!! make sure you put the appropriate name
 write.csv(redfin_df, file = "data/carpinteria/redfin_df.csv", row.names = FALSE)
 
 
 #Part 3 Regression to fill in missing data
-redfin_df_rent <- redfin_df |> filter(rentalval>0) |> mutate(asset_ratio = rentalval/PRICE)
-redfin_df_no_rent<- redfin_df |> filter(rentalval==0) |> mutate(asset_ratio = NA_real_)
+redfin_df <- redfin_df %>%
+  mutate(
+    PRICE = as.numeric(PRICE),
+    BEDS  = as.numeric(BEDS),
+    BATHS = as.numeric(BATHS),
+    `SQUARE FEET` = as.numeric(`SQUARE FEET`),
+    `YEAR BUILT`  = as.numeric(`YEAR BUILT`),
+    rentalval = as.numeric(rentalval)
+  )
 
+redfin_df_rent <- redfin_df %>% filter(is.finite(rentalval) & rentalval > 0) %>%
+  mutate(log_rent = log(rentalval))
+redfin_df_no_rent <- redfin_df %>% filter(!is.finite(rentalval) | rentalval <= 0) %>%
+  mutate(log_rent = NA_real_)
 
 ###First handle redfin_df_rent
 
@@ -410,25 +401,24 @@ boot_summary <- data.frame(
 redfin_df_rent <- dplyr::left_join(redfin_df_rent, boot_summary, by = "ADDRESS")
 ###
 
-# Ensure the required predictor variables are present
-required_vars <- c("distance_to_coast_meters",  "SQUARE FEET", "BEDS", "BATHS", "YEAR BUILT", "median_ageE", "whiteE", "blackE", "asianE", "hispanicE", "median_incomeE", "educationE", "unemploymentE")
+# Ensure the required predictor variables are present (match the model exactly)
+required_vars <- c("distance_to_coast_meters", "SQUARE FEET", "BEDS", "BATHS", "YEAR BUILT")
 
 # Create an NA column to hold predictions
-redfin_df_no_rent$log_rent <- NA
+redfin_df_no_rent$log_rent <- NA_real_
 
 # Find rows that have no missing values for predictors
 complete_rows <- complete.cases(redfin_df_no_rent[, required_vars])
 
-# Run prediction only on complete rows (using reg_model)
+# Predict only on complete rows
 redfin_df_no_rent$log_rent[complete_rows] <- predict(
   reg_model,
   newdata = redfin_df_no_rent[complete_rows, ]
 )
-redfin_check <- redfin_df_no_rent |> #dplyr::select(-c(asset_ratio))|>
-  filter(log_rent>0)
 
+# Convert back from log space
 redfin_df_no_rent <- redfin_df_no_rent |>
-  mutate(rentalval = ifelse(!is.na(log_rent), exp(log_rent), NA_real_))
+  mutate(rentalval = ifelse(is.finite(log_rent), exp(log_rent), NA_real_))
 
 #get rid of unneeded columns
 redfin_df_rent <- redfin_df_rent |> dplyr::select(-c(log_rent, "median_ageE", "whiteE", "blackE", "asianE", "hispanicE", "median_incomeE", "educationE", "unemploymentE"))
@@ -454,19 +444,21 @@ redfin_df <- redfin_df %>%
 redfin_df <- redfin_df |> 
   filter(!is.na(rentalval) & rentalval != 0)
 
-#redfin_df <- redfin_df |> rename(`ZIP OR POSTAL CODE`=ZIP.OR.POSTAL.CODE)
+redfin_df <- redfin_df %>%
+  mutate(property_id = digest(paste(ADDRESS,
+                                    `ZIP OR POSTAL CODE`,
+                                    round(LATITUDE, 6),
+                                    round(LONGITUDE, 6))))
+write_csv(redfin_df, "data/carpinteria/redfin_df.csv")
 
 ####Save the final dataframe to a CSV file in appropriate folder!!!!!
 
-# non-spatial full cleaned frame
-write.csv(redfin_df, "data/carpinteria/redfin_df.csv", row.names = FALSE)
+#saving spatial points for GIS use
+redfin_spatial_csv <- redfin_df %>%
+  dplyr::rename(longitude = LONGITUDE, latitude = LATITUDE) %>%
+  dplyr::select(-URL)  # optional: drop very long URL column to keep filesize sane
+readr::write_csv(redfin_spatial_csv, "data/carpinteria/redfin_points.csv")
 
-# spatial version
-redfin_sf <- redfin_df %>%
-  st_as_sf(coords = c("LONGITUDE", "LATITUDE"), crs = 4326, remove = FALSE) %>%
-  rename(longitude = LONGITUDE, latitude = LATITUDE)
-
-write_csv(redfin_sf, "data/carpinteria/redfin_sf.csv")
 
 
 # 
@@ -643,7 +635,7 @@ write_csv(redfin_sf, "data/carpinteria/redfin_sf.csv")
 #   within_poly <- st_within(redfin_sf, polygon, sparse = FALSE)[, 1]
 #   redfin_final <- redfin_sf[within_poly, ] |> st_drop_geometry()
 #   
-#   # Optional: Coastal distance (update path as needed)
+#   # Coastal distance (update path as needed)
 #   # coastline <- st_read("path/to/coastline.shp")
 #   # redfin_final_sf <- st_as_sf(redfin_final, coords = c("LONGITUDE", "LATITUDE"), crs = 4326)
 #   # redfin_final$COAST_DISTANCE <- st_distance(redfin_final_sf, coastline)
