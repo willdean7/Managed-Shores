@@ -1,0 +1,36 @@
+========================================
+CoSMoS Sensitivity Analysis Summary
+========================================
+Site: carpinteria
+Date: 2025-11-15
+Scenarios tested: 13
+SLR projections: Intermediate, Intermediate_High, High
+
+COMPARISON: % IMMEDIATE RETREAT (≤10 years)
+(Intermediate SLR scenario)
+
+  BASELINE (Redfin rents): 59.1%
+
+  5% Rental Yield: 0.0% (↓59.1% vs baseline)
+  4% Rental Yield: 0.0% (↓59.1% vs baseline)
+  6% Rental Yield: 0.0% (↓59.1% vs baseline)
+  Tiered Yields (6% <$1M, 5% $1-3M, 4% $3-10M, 3% >$10M): 0.0% (↓59.1% vs baseline)
+  Hybrid (Redfin if 2-8% yield, else 5%): 12.7% (↓46.4% vs baseline)
+  Patient Discount (2% = β=0.98): 0.0% (↓59.1% vs baseline)
+  Very Patient Discount (1% = β=0.99): 0.0% (↓59.1% vs baseline)
+  Ignore Minor Flooding (<15cm): 0.0% (↓59.1% vs baseline)
+  Only Major Flooding (>50cm): 0.0% (↓59.1% vs baseline)
+  Owner Utility +$50K/year: 0.0% (↓59.1% vs baseline)
+  Owner Utility +$100K/year: 0.0% (↓59.1% vs baseline)
+  Optimistic (6% yield, β=0.99, +$50K utility, >50cm threshold): 0.0% (↓59.1% vs baseline)
+
+
+RECOMMENDATIONS:
+  1. Baseline uses actual Redfin rental data (may underestimate for luxury properties)
+  2. Consider 5% fixed yield as more realistic alternative
+  3. Patient discount rate (β=0.98-0.99) appropriate for government planning
+  4. Damage threshold (15-50cm) accounts for nuisance flooding tolerance
+  5. Owner utility premium reflects non-financial coastal living value
+
+See retreat_sensitivity_comparison.csv for full details.
+========================================

@@ -1,0 +1,40 @@
+sensitivity_scenario,scenario_label,slr_scenario,n_parcels,immediate,early,mid,late,no_retreat,pct_immediate,pct_no_retreat,median_retreat,mean_retreat
+baseline,Baseline (Redfin Rents),High,110,86,7,6,6,3,78.18181818181819,2.727272727272727,1,8.247619047619047
+baseline,Baseline (Redfin Rents),Intermediate,110,65,0,3,12,28,59.09090909090909,25.454545454545453,1,14.625
+baseline,Baseline (Redfin Rents),Intermediate_High,110,79,1,11,9,8,71.81818181818181,7.2727272727272725,1,11.18
+optimistic,"Optimistic (6% yield, β=0.99, +$50K utility, >50cm threshold)",High,110,0,0,0,22,86,0,78.18181818181819,94,89.5909090909091
+optimistic,"Optimistic (6% yield, β=0.99, +$50K utility, >50cm threshold)",Intermediate,110,0,0,0,0,108,0,98.18181818181819,NA,NA
+optimistic,"Optimistic (6% yield, β=0.99, +$50K utility, >50cm threshold)",Intermediate_High,110,0,0,0,0,108,0,98.18181818181819,NA,NA
+patient_1pct,Very Patient Discount (1% = β=0.99),High,110,0,2,14,80,12,0,10.909090909090908,73,69.54166666666667
+patient_1pct,Very Patient Discount (1% = β=0.99),Intermediate,110,0,0,0,7,101,0,91.81818181818181,95,90.14285714285714
+patient_1pct,Very Patient Discount (1% = β=0.99),Intermediate_High,110,0,0,2,32,74,0,67.27272727272727,85,78.44117647058823
+patient_2pct,Patient Discount (2% = β=0.98),High,110,0,0,13,83,12,0,10.909090909090908,74,71.64583333333333
+patient_2pct,Patient Discount (2% = β=0.98),Intermediate,110,0,0,0,7,101,0,91.81818181818181,96,90.57142857142857
+patient_2pct,Patient Discount (2% = β=0.98),Intermediate_High,110,0,0,2,32,74,0,67.27272727272727,85.5,79.55882352941177
+rent_4pct,4% Rental Yield,High,110,0,3,25,74,6,0,5.454545454545454,61,61.705882352941174
+rent_4pct,4% Rental Yield,Intermediate,110,0,0,0,12,96,0,87.27272727272727,82,81.5
+rent_4pct,4% Rental Yield,Intermediate_High,110,0,0,7,50,51,0,46.36363636363637,74,73.40350877192982
+rent_5pct,5% Rental Yield,High,110,0,0,11,85,12,0,10.909090909090908,76,73.41666666666667
+rent_5pct,5% Rental Yield,Intermediate,110,0,0,0,7,101,0,91.81818181818181,96,90.71428571428571
+rent_5pct,5% Rental Yield,Intermediate_High,110,0,0,2,32,74,0,67.27272727272727,86,80.41176470588235
+rent_6pct,6% Rental Yield,High,110,0,0,3,84,21,0,19.09090909090909,85,81.25287356321839
+rent_6pct,6% Rental Yield,Intermediate,110,0,0,0,1,107,0,97.27272727272727,90,90
+rent_6pct,6% Rental Yield,Intermediate_High,110,0,0,0,17,91,0,82.72727272727273,81,81.82352941176471
+rent_hybrid,"Hybrid (Redfin if 2-8% yield, else 5%)",High,110,27,7,12,55,7,24.545454545454547,6.363636363636363,57,47.693069306930695
+rent_hybrid,"Hybrid (Redfin if 2-8% yield, else 5%)",Intermediate,110,14,0,3,15,76,12.727272727272727,69.0909090909091,41,43.5
+rent_hybrid,"Hybrid (Redfin if 2-8% yield, else 5%)",Intermediate_High,110,20,1,12,29,46,18.181818181818183,41.81818181818182,47.5,44.516129032258064
+rent_tiered,"Tiered Yields (6% <$1M, 5% $1-3M, 4% $3-10M, 3% >$10M)",High,110,1,3,26,69,9,0.9090909090909091,8.181818181818182,67,65.8080808080808
+rent_tiered,"Tiered Yields (6% <$1M, 5% $1-3M, 4% $3-10M, 3% >$10M)",Intermediate,110,0,0,1,12,95,0,86.36363636363636,90,85.07692307692308
+rent_tiered,"Tiered Yields (6% <$1M, 5% $1-3M, 4% $3-10M, 3% >$10M)",Intermediate_High,110,1,0,5,42,60,0.9090909090909091,54.54545454545455,70.5,70.25
+threshold_15cm,Ignore Minor Flooding (<15cm),High,110,0,0,7,84,17,0,15.454545454545455,82,77.94505494505495
+threshold_15cm,Ignore Minor Flooding (<15cm),Intermediate,110,0,0,0,2,106,0,96.36363636363636,90,90
+threshold_15cm,Ignore Minor Flooding (<15cm),Intermediate_High,110,0,0,0,23,85,0,77.27272727272727,82,80.69565217391305
+threshold_50cm,Only Major Flooding (>50cm),High,110,0,0,1,61,46,0,41.81818181818182,88,85.06451612903226
+threshold_50cm,Only Major Flooding (>50cm),Intermediate,110,0,0,0,0,108,0,98.18181818181819,NA,NA
+threshold_50cm,Only Major Flooding (>50cm),Intermediate_High,110,0,0,0,8,100,0,90.9090909090909,92,89.375
+utility_100k,Owner Utility +$100K/year,High,110,0,0,1,45,62,0,56.36363636363637,84.5,80.43478260869566
+utility_100k,Owner Utility +$100K/year,Intermediate,110,0,0,0,1,107,0,97.27272727272727,83,83
+utility_100k,Owner Utility +$100K/year,Intermediate_High,110,0,0,0,10,98,0,89.0909090909091,86,85.5
+utility_50k,Owner Utility +$50K/year,High,110,0,0,2,57,49,0,44.54545454545455,80,77.32203389830508
+utility_50k,Owner Utility +$50K/year,Intermediate,110,0,0,0,1,107,0,97.27272727272727,80,80
+utility_50k,Owner Utility +$50K/year,Intermediate_High,110,0,0,0,18,90,0,81.81818181818181,87,84.5

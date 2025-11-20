@@ -1,0 +1,264 @@
+========================================
+CoSMoS Retreat Schedule Summary
+========================================
+Site: carpinteria
+Date: 2025-11-19
+Planning horizon: 100 years
+
+BASELINE PARAMETERS:
+  Rental yield: 5 %
+  Discount rate: 2 %
+  Damage threshold: 0.15 m
+  Owner utility: $ 0 /year
+  Storm scenario: w000 (average conditions)
+
+BASELINE RETREAT TIMING BY SCENARIO:
+
+  High:
+    Total parcels: 113
+    Immediate retreat (≤10 yrs): 0 (0%)
+    Early retreat (11-25 yrs): 0 (0%)
+    Mid-term retreat (26-50 yrs): 15 (13.3%)
+    Late retreat (51-100 yrs): 85 (75.2%)
+    No retreat needed: 13 (11.5%)
+    Median retreat year: 75
+    Mean retreat year: 72.1
+
+  Intermediate:
+    Total parcels: 113
+    Immediate retreat (≤10 yrs): 0 (0%)
+    Early retreat (11-25 yrs): 0 (0%)
+    Mid-term retreat (26-50 yrs): 0 (0%)
+    Late retreat (51-100 yrs): 7 (6.2%)
+    No retreat needed: 106 (93.8%)
+    Median retreat year: 96
+    Mean retreat year: 90.6
+
+  Intermediate_High:
+    Total parcels: 113
+    Immediate retreat (≤10 yrs): 0 (0%)
+    Early retreat (11-25 yrs): 0 (0%)
+    Mid-term retreat (26-50 yrs): 2 (1.8%)
+    Late retreat (51-100 yrs): 32 (28.3%)
+    No retreat needed: 79 (69.9%)
+    Median retreat year: 86.5
+    Mean retreat year: 79.6
+
+
+BASELINE ECONOMIC IMPACT:
+
+  High:
+    Properties requiring retreat: 100
+    Total property value at risk: $446.9M
+    Total structure value at risk: $220.1M
+    Mean property value: $4,469K
+
+  Intermediate:
+    Properties requiring retreat: 7
+    Total property value at risk: $27.4M
+    Total structure value at risk: $13.3M
+    Mean property value: $3,908K
+
+  Intermediate_High:
+    Properties requiring retreat: 34
+    Total property value at risk: $239M
+    Total structure value at risk: $117.9M
+    Mean property value: $7,028K
+
+
+========================================
+SENSITIVITY ANALYSIS RESULTS
+========================================
+
+Key finding: How sensitive is retreat timing to parameter assumptions?
+
+Summary by parameter variation (Intermediate scenario only):
+
+Parameter Set                    | Immediate (<10yr) | Median Retreat Year
+--------------------------------|-------------------|--------------------
+BASELINE (5%, 2%, 15cm, $0)     |    0.0%          | 96.0 years
+y4_d1.5_t0_u0_w000              |    0.0%          | 82.0 years
+y4_d1.5_t0_u0_w100              |    4.4%          | 84.0 years
+y4_d1.5_t0_u25_w000             |    0.0%          | 87.0 years
+y4_d1.5_t0_u25_w100             |    0.9%          | 90.5 years
+y4_d1.5_t0_u50_w000             |    0.0%          | 92.5 years
+y4_d1.5_t0_u50_w100             |    0.9%          | 89.5 years
+y4_d1.5_t15_u0_w000             |    0.0%          | 82.0 years
+y4_d1.5_t15_u0_w100             |    4.4%          | 84.0 years
+y4_d1.5_t15_u25_w000            |    0.0%          | 87.0 years
+y4_d1.5_t15_u25_w100            |    0.9%          | 90.5 years
+y4_d1.5_t15_u50_w000            |    0.0%          | 92.5 years
+y4_d1.5_t15_u50_w100            |    0.9%          | 89.5 years
+y4_d1.5_t30_u0_w000             |    0.0%          | 82.0 years
+y4_d1.5_t30_u0_w100             |    4.4%          | 84.0 years
+y4_d1.5_t30_u25_w000            |    0.0%          | 87.0 years
+y4_d1.5_t30_u25_w100            |    0.9%          | 90.5 years
+y4_d1.5_t30_u50_w000            |    0.0%          | 92.5 years
+y4_d1.5_t30_u50_w100            |    0.9%          | 89.5 years
+y4_d2.0_t0_u0_w000              |    0.0%          | 83.0 years
+y4_d2.0_t0_u0_w100              |    2.7%          | 85.0 years
+y4_d2.0_t0_u25_w000             |    0.0%          | 87.0 years
+y4_d2.0_t0_u25_w100             |    0.9%          | 90.5 years
+y4_d2.0_t0_u50_w000             |    0.0%          | 92.5 years
+y4_d2.0_t0_u50_w100             |    0.9%          | 89.5 years
+y4_d2.0_t15_u0_w000             |    0.0%          | 83.0 years
+y4_d2.0_t15_u0_w100             |    2.7%          | 85.0 years
+y4_d2.0_t15_u25_w000            |    0.0%          | 87.0 years
+y4_d2.0_t15_u25_w100            |    0.9%          | 90.5 years
+y4_d2.0_t15_u50_w000            |    0.0%          | 92.5 years
+y4_d2.0_t15_u50_w100            |    0.9%          | 89.5 years
+y4_d2.0_t30_u0_w000             |    0.0%          | 83.0 years
+y4_d2.0_t30_u0_w100             |    2.7%          | 85.0 years
+y4_d2.0_t30_u25_w000            |    0.0%          | 87.0 years
+y4_d2.0_t30_u25_w100            |    0.9%          | 90.5 years
+y4_d2.0_t30_u50_w000            |    0.0%          | 92.5 years
+y4_d2.0_t30_u50_w100            |    0.9%          | 89.5 years
+y4_d3.0_t0_u0_w000              |    0.0%          | 83.0 years
+y4_d3.0_t0_u0_w100              |    2.7%          | 85.0 years
+y4_d3.0_t0_u25_w000             |    0.0%          | 87.0 years
+y4_d3.0_t0_u25_w100             |    0.9%          | 91.0 years
+y4_d3.0_t0_u50_w000             |    0.0%          | 92.5 years
+y4_d3.0_t0_u50_w100             |    0.9%          | 90.0 years
+y4_d3.0_t15_u0_w000             |    0.0%          | 83.0 years
+y4_d3.0_t15_u0_w100             |    2.7%          | 85.0 years
+y4_d3.0_t15_u25_w000            |    0.0%          | 87.0 years
+y4_d3.0_t15_u25_w100            |    0.9%          | 91.0 years
+y4_d3.0_t15_u50_w000            |    0.0%          | 92.5 years
+y4_d3.0_t15_u50_w100            |    0.9%          | 90.0 years
+y4_d3.0_t30_u0_w000             |    0.0%          | 83.0 years
+y4_d3.0_t30_u0_w100             |    2.7%          | 85.0 years
+y4_d3.0_t30_u25_w000            |    0.0%          | 87.0 years
+y4_d3.0_t30_u25_w100            |    0.9%          | 91.0 years
+y4_d3.0_t30_u50_w000            |    0.0%          | 92.5 years
+y4_d3.0_t30_u50_w100            |    0.9%          | 90.0 years
+y5_d1.5_t0_u0_w000              |    0.0%          | 95.0 years
+y5_d1.5_t0_u0_w100              |    0.9%          | 94.0 years
+y5_d1.5_t0_u25_w000             |    0.0%          | 92.0 years
+y5_d1.5_t0_u25_w100             |    0.0%          | 92.0 years
+y5_d1.5_t0_u50_w000             |    0.0%          | 93.0 years
+y5_d1.5_t0_u50_w100             |    0.0%          | 93.0 years
+y5_d1.5_t15_u0_w000             |    0.0%          | 95.0 years
+y5_d1.5_t15_u0_w100             |    0.9%          | 94.0 years
+y5_d1.5_t15_u25_w000            |    0.0%          | 92.0 years
+y5_d1.5_t15_u25_w100            |    0.0%          | 92.0 years
+y5_d1.5_t15_u50_w000            |    0.0%          | 93.0 years
+y5_d1.5_t15_u50_w100            |    0.0%          | 93.0 years
+y5_d1.5_t30_u0_w000             |    0.0%          | 95.0 years
+y5_d1.5_t30_u0_w100             |    0.9%          | 94.0 years
+y5_d1.5_t30_u25_w000            |    0.0%          | 92.0 years
+y5_d1.5_t30_u25_w100            |    0.0%          | 92.0 years
+y5_d1.5_t30_u50_w000            |    0.0%          | 93.0 years
+y5_d1.5_t30_u50_w100            |    0.0%          | 93.0 years
+y5_d2.0_t0_u0_w000              |    0.0%          | 96.0 years
+y5_d2.0_t0_u0_w100              |    0.9%          | 94.0 years
+y5_d2.0_t0_u25_w000             |    0.0%          | 92.0 years
+y5_d2.0_t0_u25_w100             |    0.0%          | 92.0 years
+y5_d2.0_t0_u50_w000             |    0.0%          | 93.0 years
+y5_d2.0_t0_u50_w100             |    0.0%          | 93.0 years
+y5_d2.0_t15_u0_w100             |    0.9%          | 94.0 years
+y5_d2.0_t15_u25_w000            |    0.0%          | 92.0 years
+y5_d2.0_t15_u25_w100            |    0.0%          | 92.0 years
+y5_d2.0_t15_u50_w000            |    0.0%          | 93.0 years
+y5_d2.0_t15_u50_w100            |    0.0%          | 93.0 years
+y5_d2.0_t30_u0_w000             |    0.0%          | 96.0 years
+y5_d2.0_t30_u0_w100             |    0.9%          | 94.0 years
+y5_d2.0_t30_u25_w000            |    0.0%          | 92.0 years
+y5_d2.0_t30_u25_w100            |    0.0%          | 92.0 years
+y5_d2.0_t30_u50_w000            |    0.0%          | 93.0 years
+y5_d2.0_t30_u50_w100            |    0.0%          | 93.0 years
+y5_d3.0_t0_u0_w000              |    0.0%          | 96.0 years
+y5_d3.0_t0_u0_w100              |    0.9%          | 94.0 years
+y5_d3.0_t0_u25_w000             |    0.0%          | 92.5 years
+y5_d3.0_t0_u25_w100             |    0.0%          | 92.0 years
+y5_d3.0_t0_u50_w000             |    0.0%          | 93.0 years
+y5_d3.0_t0_u50_w100             |    0.0%          | 93.0 years
+y5_d3.0_t15_u0_w000             |    0.0%          | 96.0 years
+y5_d3.0_t15_u0_w100             |    0.9%          | 94.0 years
+y5_d3.0_t15_u25_w000            |    0.0%          | 92.5 years
+y5_d3.0_t15_u25_w100            |    0.0%          | 92.0 years
+y5_d3.0_t15_u50_w000            |    0.0%          | 93.0 years
+y5_d3.0_t15_u50_w100            |    0.0%          | 93.0 years
+y5_d3.0_t30_u0_w000             |    0.0%          | 96.0 years
+y5_d3.0_t30_u0_w100             |    0.9%          | 94.0 years
+y5_d3.0_t30_u25_w000            |    0.0%          | 92.5 years
+y5_d3.0_t30_u25_w100            |    0.0%          | 92.0 years
+y5_d3.0_t30_u50_w000            |    0.0%          | 93.0 years
+y5_d3.0_t30_u50_w100            |    0.0%          | 93.0 years
+y6_d1.5_t0_u0_w000              |    0.0%          | 89.0 years
+y6_d1.5_t0_u0_w100              |    0.0%          | 93.0 years
+y6_d1.5_t0_u25_w000             |    0.0%          | 98.0 years
+y6_d1.5_t0_u25_w100             |    0.0%          | 97.0 years
+y6_d1.5_t0_u50_w000             |    0.0%          | NA years
+y6_d1.5_t0_u50_w100             |    0.0%          | 86.0 years
+y6_d1.5_t15_u0_w000             |    0.0%          | 89.0 years
+y6_d1.5_t15_u0_w100             |    0.0%          | 93.0 years
+y6_d1.5_t15_u25_w000            |    0.0%          | 98.0 years
+y6_d1.5_t15_u25_w100            |    0.0%          | 97.0 years
+y6_d1.5_t15_u50_w000            |    0.0%          | NA years
+y6_d1.5_t15_u50_w100            |    0.0%          | 86.0 years
+y6_d1.5_t30_u0_w000             |    0.0%          | 89.0 years
+y6_d1.5_t30_u0_w100             |    0.0%          | 93.0 years
+y6_d1.5_t30_u25_w000            |    0.0%          | 98.0 years
+y6_d1.5_t30_u25_w100            |    0.0%          | 97.0 years
+y6_d1.5_t30_u50_w000            |    0.0%          | NA years
+y6_d1.5_t30_u50_w100            |    0.0%          | 86.0 years
+y6_d2.0_t0_u0_w000              |    0.0%          | 90.0 years
+y6_d2.0_t0_u0_w100              |    0.0%          | 93.0 years
+y6_d2.0_t0_u25_w000             |    0.0%          | 98.0 years
+y6_d2.0_t0_u25_w100             |    0.0%          | 97.0 years
+y6_d2.0_t0_u50_w000             |    0.0%          | NA years
+y6_d2.0_t0_u50_w100             |    0.0%          | 86.0 years
+y6_d2.0_t15_u0_w000             |    0.0%          | 90.0 years
+y6_d2.0_t15_u0_w100             |    0.0%          | 93.0 years
+y6_d2.0_t15_u25_w000            |    0.0%          | 98.0 years
+y6_d2.0_t15_u25_w100            |    0.0%          | 97.0 years
+y6_d2.0_t15_u50_w000            |    0.0%          | NA years
+y6_d2.0_t15_u50_w100            |    0.0%          | 86.0 years
+y6_d2.0_t30_u0_w000             |    0.0%          | 90.0 years
+y6_d2.0_t30_u0_w100             |    0.0%          | 93.0 years
+y6_d2.0_t30_u25_w000            |    0.0%          | 98.0 years
+y6_d2.0_t30_u25_w100            |    0.0%          | 97.0 years
+y6_d2.0_t30_u50_w000            |    0.0%          | NA years
+y6_d2.0_t30_u50_w100            |    0.0%          | 86.0 years
+y6_d3.0_t0_u0_w000              |    0.0%          | 90.0 years
+y6_d3.0_t0_u0_w100              |    0.0%          | 93.0 years
+y6_d3.0_t0_u25_w000             |    0.0%          | 98.0 years
+y6_d3.0_t0_u25_w100             |    0.0%          | 97.0 years
+y6_d3.0_t0_u50_w000             |    0.0%          | NA years
+y6_d3.0_t0_u50_w100             |    0.0%          | 86.0 years
+y6_d3.0_t15_u0_w000             |    0.0%          | 90.0 years
+y6_d3.0_t15_u0_w100             |    0.0%          | 93.0 years
+y6_d3.0_t15_u25_w000            |    0.0%          | 98.0 years
+y6_d3.0_t15_u25_w100            |    0.0%          | 97.0 years
+y6_d3.0_t15_u50_w000            |    0.0%          | NA years
+y6_d3.0_t15_u50_w100            |    0.0%          | 86.0 years
+y6_d3.0_t30_u0_w000             |    0.0%          | 90.0 years
+y6_d3.0_t30_u0_w100             |    0.0%          | 93.0 years
+y6_d3.0_t30_u25_w000            |    0.0%          | 98.0 years
+y6_d3.0_t30_u25_w100            |    0.0%          | 97.0 years
+y6_d3.0_t30_u50_w000            |    0.0%          | NA years
+y6_d3.0_t30_u50_w100            |    0.0%          | 86.0 years
+
+See sensitivity_summary.csv for complete results across all scenarios.
+
+
+OUTPUT FILES:
+  - retreat_schedule_baseline.csv: Baseline scenario property-level results
+  - retreat_schedule_sensitivity.csv: All sensitivity scenarios
+  - sensitivity_summary.csv: Summary statistics for comparison
+
+OUTPUT COLUMNS:
+  - parcel_id: Property identifier
+  - scenario: SLR scenario (Intermediate, Intermediate_High, High)
+  - retreat_year: Optimal year to retreat (T*)
+  - reason: Timing category (immediate, early, mid_term, late, no_retreat_needed)
+  - parameter_set: Label for parameter combination
+  - rental_yield, discount_rate, damage_threshold, owner_utility, storm_scenario: Parameters used
+  - ADDRESS, PRICE, rent, strval, elevation, etc.: Property details
+
+NEXT STEPS:
+  1. Review retreat_schedule_baseline.csv for detailed property-level results
+  2. Compare sensitivity_summary.csv to understand parameter importance
+  3. Create visualizations comparing scenarios and parameter variations
+  4. Identify priority properties for buyout programs
+========================================

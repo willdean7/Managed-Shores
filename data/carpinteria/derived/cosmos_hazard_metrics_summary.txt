@@ -1,0 +1,28 @@
+========================================
+CoSMoS Hazard Metrics Extraction Summary
+========================================
+Site: carpinteria
+Date: 2025-11-18
+Storm scenarios: w000 (average) and w100 (extreme)
+
+DATA COVERAGE:
+  Total parcels: 113
+  SLR levels: 0, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 5 m
+
+FLOODING METRICS:
+  Parcel-SLR combos with depth data: 1130
+  Parcel-SLR combos flooded (> 0.15 m): 414
+  Parcel-SLR combos with duration data: 1130
+  Parcel-SLR combos with wave data: 1130
+
+VECTOR METRICS:
+  Parcels with runup data: 678
+  Parcels exposed to runup: 229
+  Parcels with shoreline data: 0
+  Parcels exposed to cliff retreat: 0
+  Parcels in coastal squeeze zones: 0
+
+NEXT STEPS:
+  1. Run interpolate_cosmos_to_years.R to create annual hazard timelines
+  2. Run calculate_retreat_years.R to compute optimal retreat timing
+========================================
