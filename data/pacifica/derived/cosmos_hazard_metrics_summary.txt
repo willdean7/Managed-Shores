@@ -1,0 +1,21 @@
+========================================
+CoSMoS Hazard Metrics Extraction Summary
+========================================
+Site: pacifica
+Site type: CLIFF-ONLY
+Date: 2025-12-03
+
+DATA COVERAGE:
+  Total parcels: 230
+  SLR levels: 0.25, 0.5, 0.75, 0.92, 1, 1.25, 1.5, 1.75, 2, 2.5, 3, 5 m
+
+VECTOR METRICS:
+  Parcels with cliff data: 5520
+  Parcels within 50m of cliff: 1247
+  Parcels within 100m of cliff: 2190
+
+NEXT STEPS:
+  1. Run interpolate_cosmos.R for flood hazard timelines
+  2. Integrate cliff data (see cosmos_cliff_annual.csv if year-based)
+  3. Run calculate_retreat_years.R to compute optimal retreat timing
+========================================

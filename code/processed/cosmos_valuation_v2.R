@@ -3,7 +3,7 @@
 # Author: Will Dean (Managed Shores)
 #
 # Input:
-#   - data/{site}/derived/cosmos_annual_hazards.csv (from interpolate_cosmos_to_years.R)
+#   - data/{site}/derived/cosmos_annual_hazards.csv (from interpolate_cosmos.R)
 #   - data/{site}/redfin_df.csv (property data with prices, rents, locations)
 #   - data/landprices_CA_ms.csv (California land values by ZIP code)
 #

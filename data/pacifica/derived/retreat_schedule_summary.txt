@@ -1,0 +1,52 @@
+=================================================
+MANAGED SHORES - RETREAT SCHEDULE SUMMARY
+Site: PACIFICA 
+Site type: CLIFF-ONLY 
+Generated: 2025-12-17 17:02:19 
+=================================================
+
+CLIFF RETREAT PARAMETERS:
+  Planned retreat threshold: 25 m
+  Immediate safety threshold: 10 m
+  Already exposed properties: Use erosion rate to calculate T* 
+
+BASELINE PARAMETERS:
+  Rental yield: 5 %
+  Discount rate: 2 %
+  Damage threshold: 0.15 m
+  Owner utility: $ 0 /year
+  Cliff scenario: LetItGo 
+
+BASELINE RESULTS:
+  Total properties: 230 
+
+  Retreat triggers:
+     no_retreat_needed : 451 
+     cliff_planned_retreat : 173 
+     cliff_immediate_safety : 42 
+     cliff_erosion_ongoing : 24 
+
+  Cliff exposure status:
+     immediate_hazard : 42 
+     safe : 588 
+     within_retreat_threshold : 60 
+
+  Retreat timing:
+     no_retreat : 451 
+     mid_term : 105 
+     late : 82 
+     immediate : 42 
+     early : 10 
+
+  Retreating properties:
+    Count: 239 
+    Mean year: 39.9 
+    Median year: 41 
+
+  Buyout costs:
+    Total buyout: $ 254.5 M
+    Total market: $ 266.4 M
+    Savings: $ 11.9 M ( 4.5 % discount)
+    Mean buyout: $ 1,065 k
+
+=================================================

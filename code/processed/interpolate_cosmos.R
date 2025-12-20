@@ -28,7 +28,7 @@ case_name <- "carpinteria"  # Change for other sites
 data_dir <- file.path("data", case_name)
 derived_dir <- file.path(data_dir, "derived")
 
-bigT <- 100  # Planning horizon (years from present)
+bigT <- 80  # Planning horizon (years from present, 80 to match OPC 2024 data)
 
 
 message("CoSMoS Temporal Interpolation: ", toupper(case_name))
@@ -69,7 +69,7 @@ sea_level_data <- list(
 
 # Fit quadratic models to get smooth annual SLR(t) curves
 # We use quadratic because SLR accelerates over time
-fit_slr_model <- function(df, years = 1:100) {
+fit_slr_model <- function(df, years = 1:bigT) {
   df$timesquared <- df$time^2
   m <- lm(sea_level_rise ~ time + timesquared, data = df)
   nd <- data.frame(time = years, timesquared = years^2)
@@ -80,14 +80,14 @@ fit_slr_model <- function(df, years = 1:100) {
 }
 
 # Create smooth annual SLR vectors for each scenario
-slr_scenarios <- lapply(sea_level_data, fit_slr_model)
+slr_scenarios <- lapply(sea_level_data, function(df) fit_slr_model(df, years = 1:bigT))
 
 # Preview
 message("OPC 2024 SLR Scenarios (annual interpolation):")
 for (scen in names(slr_scenarios)) {
   slr_vec <- slr_scenarios[[scen]]
-  message(sprintf("  %s: Year 1 = %.2fm, Year 50 = %.2fm, Year 100 = %.2fm", 
-                  scen, slr_vec[1], slr_vec[50], slr_vec[100]))
+  message(sprintf("  %s: Year 1 = %.2fm, Year 50 = %.2fm, Year %d = %.2fm", 
+                  scen, slr_vec[1], slr_vec[50], bigT, slr_vec[bigT]))
 }
 
 # INTERPOLATION FUNCTIONS
@@ -100,12 +100,13 @@ interpolate_annual_hazards <- function(parcel_hazards, slr_annual_vec, parcel_nu
   years <- 1:length(slr_annual_vec)
   results <- tibble(year = years, slr_m = slr_annual_vec)
   
-  # Metrics to interpolate (both w000 and w100)
+  # Metrics to interpolate (average conditions only)
+  # Storm scenarios (w100) removed - will be handled by Monte Carlo simulation later
   continuous_metrics <- c(
-    "depth_m", "depth_m_w100",
-    "duration_hr", "duration_hr_w100",
-    "wave_ht_m", "wave_ht_m_w100",
-    "runup_dist_m", "runup_dist_m_w100",
+    "depth_m",
+    "duration_hr",
+    "wave_ht_m",
+    "runup_dist_m",
     "shore_dist_m", "cliff_dist_m"
   )
   
@@ -137,9 +138,10 @@ interpolate_annual_hazards <- function(parcel_hazards, slr_annual_vec, parcel_nu
   }
   
   # Binary flags: becomes TRUE when SLR exceeds threshold where flag=TRUE in static data
+  # Storm scenarios (w100) removed - will be handled by Monte Carlo simulation later
   binary_metrics <- c(
     "flooded", 
-    "runup_exposed", "runup_exposed_w100",
+    "runup_exposed",
     "cliff_exposed", "in_squeeze_zone"
   )
   
@@ -174,17 +176,43 @@ for (scen_name in names(slr_scenarios)) {
   
   slr_vec <- slr_scenarios[[scen_name]]
   
+  # Get unique cliff management scenarios from input data
+  cliff_scenarios <- unique(hazards$scenario)
+  if (length(cliff_scenarios) == 0 || all(is.na(cliff_scenarios))) {
+    cliff_scenarios <- c(NA)  # No cliff scenarios in data
+  }
+  
+  message("    Cliff management scenarios: ", paste(cliff_scenarios, collapse = ", "))
+  
   # Process each parcel
   parcel_ids <- unique(hazards$parcel_id)
   
   parcel_annual <- map_dfr(parcel_ids, function(pid) {
-    parcel_data <- hazards %>% filter(parcel_id == pid)
+    # Process each cliff management scenario separately
+    parcel_results <- map_dfr(cliff_scenarios, function(cliff_scen) {
+      # Filter for this parcel and cliff scenario
+      if (is.na(cliff_scen)) {
+        parcel_data <- hazards %>% filter(parcel_id == pid)
+      } else {
+        parcel_data <- hazards %>% 
+          filter(parcel_id == pid, scenario == cliff_scen)
+      }
+      
+      if (nrow(parcel_data) == 0) return(NULL)
+      
+      annual <- interpolate_annual_hazards(parcel_data, slr_vec, pid)
+      annual$parcel_id <- pid
+      annual$scenario <- scen_name
+      
+      # Preserve cliff management scenario if it exists
+      if (!is.na(cliff_scen)) {
+        annual$cliff_scenario <- cliff_scen
+      }
+      
+      annual
+    })
     
-    annual <- interpolate_annual_hazards(parcel_data, slr_vec, pid)
-    annual$parcel_id <- pid
-    annual$scenario <- scen_name
-    
-    annual
+    parcel_results
   })
   
   annual_hazards_list[[scen_name]] <- parcel_annual
@@ -196,21 +224,32 @@ annual_hazards <- bind_rows(annual_hazards_list)
 message("\n✓ Interpolation complete!")
 message("  - Total rows: ", nrow(annual_hazards))
 message("  - Parcels: ", n_distinct(annual_hazards$parcel_id))
-message("  - Scenarios: ", paste(unique(annual_hazards$scenario), collapse = ", "))
+message("  - SLR scenarios: ", paste(unique(annual_hazards$scenario), collapse = ", "))
+
+if ("cliff_scenario" %in% names(annual_hazards)) {
+  message("  - Cliff management scenarios: ", paste(unique(annual_hazards$cliff_scenario), collapse = ", "))
+}
+
 message("  - Years: ", min(annual_hazards$year), "-", max(annual_hazards$year), "\n")
 
-# ADD FLOODING FLAGS BASED ON THRESHOLD
-
-# Apply flooding threshold to annual data (0.15m as in extraction)
-# IMPORTANT: This threshold must match extract_cosmos_metrics_unified.R
-# for consistent flood classification across the pipeline
-flood_threshold_m <- 0.15
-
-annual_hazards <- annual_hazards %>%
-  mutate(
-    flooded_w000 = !is.na(depth_m) & depth_m >= flood_threshold_m,
-    flooded_w100 = !is.na(depth_m_w100) & depth_m_w100 >= flood_threshold_m
-  )
+# ADD FLOODING FLAG BASED ON THRESHOLD
+# Only apply if depth_m column exists (flood sites)
+if ("depth_m" %in% names(annual_hazards)) {
+  # Apply flooding threshold to annual data (0.15m as in extraction)
+  # IMPORTANT: This threshold must match extract_cosmos_metrics_unified.R
+  # for consistent flood classification across the pipeline
+  flood_threshold_m <- 0.15
+  
+  annual_hazards <- annual_hazards %>%
+    mutate(
+      flooded = !is.na(depth_m) & depth_m >= flood_threshold_m
+    )
+  
+  has_flood_data <- TRUE
+} else {
+  message("  Note: No flood data (cliff-only site)")
+  has_flood_data <- FALSE
+}
 
 
 # SAVE OUTPUTS
@@ -223,34 +262,6 @@ message("✓ Saved: ", out_csv)
 
 # SUMMARY REPORT
 
-# Count flooding events per scenario
-flood_summary <- annual_hazards %>%
-  group_by(scenario) %>%
-  summarise(
-    total_parcel_years = n(),
-    flooded_w000_count = sum(flooded_w000, na.rm = TRUE),
-    flooded_w100_count = sum(flooded_w100, na.rm = TRUE),
-    pct_flooded_w000 = 100 * mean(flooded_w000, na.rm = TRUE),
-    pct_flooded_w100 = 100 * mean(flooded_w100, na.rm = TRUE),
-    .groups = "drop"
-  )
-
-# First year of flooding for each parcel × scenario (w000)
-first_flood <- annual_hazards %>%
-  filter(flooded_w000) %>%
-  group_by(parcel_id, scenario) %>%
-  summarise(first_flood_year = min(year, na.rm = TRUE), .groups = "drop")
-
-first_flood_summary <- first_flood %>%
-  group_by(scenario) %>%
-  summarise(
-    parcels_flood = n(),
-    median_first_flood = median(first_flood_year, na.rm = TRUE),
-    min_first_flood = min(first_flood_year, na.rm = TRUE),
-    max_first_flood = max(first_flood_year, na.rm = TRUE),
-    .groups = "drop"
-  )
-
 # Create summary text
 summary_lines <- c(
   "========================================",
@@ -262,42 +273,99 @@ summary_lines <- c(
   "",
   "SCENARIOS:",
   paste("  ", names(slr_scenarios)),
-  "",
-  "FLOODING SUMMARY (w000 = average conditions):",
   ""
 )
 
-for (i in 1:nrow(flood_summary)) {
-  s <- flood_summary[i, ]
+# FLOOD SUMMARY (only if flood data exists)
+if (has_flood_data) {
+  # Count flooding events per scenario
+  flood_summary <- annual_hazards %>%
+    group_by(scenario) %>%
+    summarise(
+      total_parcel_years = n(),
+      flooded_count = sum(flooded, na.rm = TRUE),
+      pct_flooded = 100 * mean(flooded, na.rm = TRUE),
+      .groups = "drop"
+    )
+  
   summary_lines <- c(
     summary_lines,
-    paste0("  ", s$scenario, ":"),
-    paste0("    Total (parcel × year) combinations: ", s$total_parcel_years),
-    paste0("    Flooded instances (w000): ", s$flooded_w000_count, 
-           " (", round(s$pct_flooded_w000, 1), "%)"),
-    paste0("    Flooded instances (w100): ", s$flooded_w100_count,
-           " (", round(s$pct_flooded_w100, 1), "%)"),
+    "FLOODING SUMMARY (average annual conditions):",
     ""
   )
+  
+  for (i in 1:nrow(flood_summary)) {
+    s <- flood_summary[i, ]
+    summary_lines <- c(
+      summary_lines,
+      paste0("  ", s$scenario, ":"),
+      paste0("    Total (parcel × year) combinations: ", s$total_parcel_years),
+      paste0("    Flooded instances: ", s$flooded_count, 
+             " (", round(s$pct_flooded, 1), "%)"),
+      ""
+    )
+  }
+  
+  # First year of flooding for each parcel × scenario
+  first_flood <- annual_hazards %>%
+    filter(flooded) %>%
+    group_by(parcel_id, slr_scenario) %>%
+    summarise(first_flood_year = min(year, na.rm = TRUE), .groups = "drop")
+  
+  first_flood_summary <- first_flood %>%
+    group_by(scenario) %>%
+    summarise(
+      parcels_flood = n(),
+      median_first_flood = median(first_flood_year, na.rm = TRUE),
+      min_first_flood = min(first_flood_year, na.rm = TRUE),
+      max_first_flood = max(first_flood_year, na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  summary_lines <- c(
+    summary_lines,
+    "",
+    "FIRST FLOODING YEAR (average conditions):",
+    ""
+  )
+  
+  for (i in 1:nrow(first_flood_summary)) {
+    s <- first_flood_summary[i, ]
+    summary_lines <- c(
+      summary_lines,
+      paste0("  ", s$scenario, ":"),
+      paste0("    Parcels that flood: ", s$parcels_flood),
+      paste0("    Median first flood year: ", round(s$median_first_flood)),
+      paste0("    Range: year ", s$min_first_flood, " to ", s$max_first_flood),
+      ""
+    )
+  }
 }
 
-summary_lines <- c(
-  summary_lines,
-  "",
-  "FIRST FLOODING YEAR (w000):",
-  ""
-)
-
-for (i in 1:nrow(first_flood_summary)) {
-  s <- first_flood_summary[i, ]
+# CLIFF SUMMARY (if cliff data exists)
+if ("cliff_dist_m" %in% names(annual_hazards)) {
   summary_lines <- c(
     summary_lines,
-    paste0("  ", s$scenario, ":"),
-    paste0("    Parcels that flood: ", s$parcels_flood),
-    paste0("    Median first flood year: ", round(s$median_first_flood)),
-    paste0("    Range: year ", s$min_first_flood, " to ", s$max_first_flood),
+    "",
+    "CLIFF RETREAT SUMMARY:",
     ""
   )
+  
+  # Calculate cliff statistics
+  for (slr_scen in unique(annual_hazards$scenario)) {
+    scen_data <- annual_hazards %>% filter(scenario == slr_scen)
+    
+    # Count properties in danger zones at different time points
+    year_80 <- scen_data %>% filter(year == bigT)
+    
+    summary_lines <- c(
+      summary_lines,
+      paste0("  ", slr_scen, " (Year ", bigT, "):"),
+      paste0("    Parcels within 50m: ", sum(year_80$cliff_dist_m < 50, na.rm = TRUE)),
+      paste0("    Parcels within 100m: ", sum(year_80$cliff_dist_m < 100, na.rm = TRUE)),
+      ""
+    )
+  }
 }
 
 summary_lines <- c(
@@ -310,17 +378,41 @@ summary_lines <- c(
 )
 
 # Add example rows
-example <- annual_hazards %>%
-  filter(parcel_id == 1, scenario == "Intermediate", year <= 5) %>%
-  select(year, slr_m, depth_m, depth_m_w100, flooded_w000, flooded_w100)
-
-for (i in 1:nrow(example)) {
-  row <- example[i, ]
-  summary_lines <- c(
-    summary_lines,
-    sprintf("  Year %d: SLR=%.3fm, depth_w000=%.2fm, depth_w100=%.2fm, flooded_w000=%s, flooded_w100=%s",
-            row$year, row$slr_m, row$depth_m, row$depth_m_w100, row$flooded_w000, row$flooded_w100)
-  )
+if ("depth_m" %in% names(annual_hazards)) {
+  # Flood site example
+  example <- annual_hazards %>%
+    filter(parcel_id == 1, scenario == "Intermediate", year <= 5) %>%
+    select(year, slr_m, depth_m, flooded)
+  
+  for (i in 1:nrow(example)) {
+    row <- example[i, ]
+    summary_lines <- c(
+      summary_lines,
+      sprintf("  Year %d: SLR=%.3fm, depth=%.2fm, flooded=%s",
+              row$year, row$slr_m, row$depth_m, row$flooded)
+    )
+  }
+} else if ("cliff_dist_m" %in% names(annual_hazards)) {
+  # Cliff site example
+  example <- annual_hazards %>%
+    filter(parcel_id == 1, scenario == "Intermediate", year <= 5)
+  
+  if ("cliff_scenario" %in% names(example)) {
+    example <- example %>% filter(cliff_scenario == unique(cliff_scenario)[1])
+  }
+  
+  example <- example %>% select(year, slr_m, cliff_dist_m)
+  
+  for (i in 1:nrow(example)) {
+    row <- example[i, ]
+    in_50m <- row$cliff_dist_m < 50
+    in_100m <- row$cliff_dist_m < 100
+    summary_lines <- c(
+      summary_lines,
+      sprintf("  Year %d: SLR=%.3fm, cliff_dist=%.1fm, 50m=%s, 100m=%s",
+              row$year, row$slr_m, row$cliff_dist_m, in_50m, in_100m)
+    )
+  }
 }
 
 summary_lines <- c(
@@ -339,3 +431,4 @@ writeLines(summary_lines, summary_file)
 cat("\n")
 cat(paste(summary_lines, collapse = "\n"))
 cat("\n\n")
+
