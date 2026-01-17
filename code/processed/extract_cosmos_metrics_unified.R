@@ -66,7 +66,6 @@
 #   - Warns user about missing datasets but continues processing
 #   - Allows flexible application across sites with different hazard profiles
 #
-# ============================================================================
 
 rm(list = ls())
 library(terra)
@@ -96,13 +95,13 @@ flood_threshold_m <- 0.15
 # STORM SCENARIO MODE
 USE_STORM_SCENARIOS <- TRUE
 
-message("\n========================================")
+
 if (USE_STORM_SCENARIOS) {
   message("MODE: Storm Scenarios (annual, 20yr, 100yr)")
 } else {
   message("MODE: Average Conditions (legacy)")
 }
-message("========================================\n")
+
 
 # STORM HELPER FUNCTIONS
 
@@ -252,10 +251,8 @@ message("  OK Loaded ", nrow(parcels), " parcels")
 has_storm_data <- dir.exists(file.path(cosmos_dir, "storm_1yr_depth"))
 
 if (USE_STORM_SCENARIOS && has_storm_data) {
-  
-  message("\n========================================")
+
   message("EXTRACTING STORM FLOOD SCENARIOS")
-  message("========================================")
   
   # Annual storm
   annual_dir <- file.path(cosmos_dir, "storm_1yr_depth")
@@ -273,9 +270,7 @@ if (USE_STORM_SCENARIOS && has_storm_data) {
                                         parcels, parcels$parcel_id)
   
   # Save storm data
-  message("\n========================================")
   message("SAVING STORM DATA")
-  message("========================================\n")
   
   if (!is.null(storm_annual)) {
     out_path <- file.path(derived_dir, "storm_annual.csv")
@@ -325,9 +320,7 @@ if (USE_STORM_SCENARIOS && has_storm_data) {
 
 if (!exists("SKIP_AVERAGE_CONDITIONS") || !SKIP_AVERAGE_CONDITIONS) {
   
-  message("\n========================================")
   message("EXTRACTING AVERAGE CONDITIONS (LEGACY)")
-  message("========================================\n")
   
   # Helper function to extract one metric for one storm
   extract_raster_metric <- function(metric_name, storm) {
@@ -530,9 +523,9 @@ if (!dir.exists(cliff_dir)) {
           message("    Features: ", nrow(cliff_data))
           message("    Columns: ", paste(names(cliff_data), collapse = ", "))
           
-          # ====================================================================
+          
           # STRATEGY 1: SoCal format - SLR encoded in Name field as text
-          # ====================================================================
+          
           # Format: "Cliff position, 0.25 m SLR" or similar
           
           if ("Name" %in% names(cliff_data)) {
@@ -596,9 +589,8 @@ if (!dir.exists(cliff_dir)) {
               print(head(cliff_data$Name, 5))
             }
             
-            # ====================================================================
+            
             # STRATEGY 2: Files with explicit SLR_cm or SLR fields
-            # ====================================================================
           } else if (any(c("SLR_cm", "SLR", "slr_cm", "slr") %in% names(cliff_data))) {
             
             message("    Detected explicit SLR field")
@@ -743,13 +735,9 @@ if (!dir.exists(cliff_dir)) {
   }
 }
 
-# ============================================================================
 # FINAL MERGE AND SAVE
-# ============================================================================
 
-message("\n========================================")
 message("MERGING AND SAVING FINAL OUTPUT")
-message("========================================\n")
 
 # Determine what data we have
 has_raster <- exists("raster_metrics") && nrow(raster_metrics) > 0
@@ -844,7 +832,5 @@ if ("scenario" %in% names(final_output)) {
   message("  Management scenarios: ", paste(sort(unique(final_output$scenario)), collapse = ", "))
 }
 
-message("\n========================================")
 message("EXTRACTION COMPLETE!")
-message("========================================\n")
 message("Next step: Run interpolate_cosmos.R to create annual timelines\n")

@@ -2,12 +2,6 @@
 # Monte Carlo Storm Simulation Module
 # Author: Will Dean
 #
-# CRITICAL FIX: Pre-filter storm data ONCE per property instead of 24,000 times
-# Previous bottleneck: interpolate_storm_depth() filtered entire dataset repeatedly
-# New approach: Pre-filter and create interpolation functions once
-#
-# Performance: ~0.1-0.2 seconds per property with 100 sims (vs 450+ seconds before)
-# Speedup: ~2000-4000x faster!
 
 library(dplyr)
 library(tidyr)

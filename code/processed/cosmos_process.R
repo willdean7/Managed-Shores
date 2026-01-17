@@ -39,12 +39,12 @@ bbox4326 <- st_bbox(bbox_lookup[[case_name]], crs = st_crs(4326))
 local_output <- file.path(project_base, sprintf("data/%s/cosmos", case_name))
 dir.create(local_output, recursive = TRUE, showWarnings = FALSE)
 
-message("========================================")
+
 message("CoSMoS Storm Processing: ", toupper(case_name))
 message("========================================")
 message("AOI: ", paste(names(bbox4326), round(bbox4326, 3), collapse = ", "))
 message("Output: ", local_output)
-message("========================================\n")
+
 
 # Expand AOI
 bbox_poly_work         <- st_transform(st_as_sfc(bbox4326), crs_work) |> st_buffer(500)
@@ -75,9 +75,7 @@ message("SLR OPTIMIZATION:")
 message("  Processing ", length(SLR_LEVELS_TO_PROCESS), " SLR levels (instead of all ~15)")
 message("  Levels: ", paste(SLR_LEVELS_TO_PROCESS, collapse = ", "))
 
-# ============================================================================
 # HELPER FUNCTIONS
-# ============================================================================
 
 crop_raster_to_bbox <- function(r, bbox_poly_4326) {
   b <- st_transform(bbox_poly_4326, crs(r))
@@ -222,10 +220,8 @@ process_storm_metric <- function(base_dir, out_dir, metric_name) {
   invisible(NULL)
 }
 
-# ============================================================================
 # STORM SCENARIO PROCESSING
 # change the folder names for each case study
-# ============================================================================
 
 storm_configs <- list(
   annual = list(
@@ -277,13 +273,10 @@ for (storm_type in names(storm_configs)) {
   message("\n✓ Completed: ", config$name, "\n")
 }
 
-# ============================================================================
-# SUMMARY
-# ============================================================================
 
-message("\n========================================")
+# SUMMARY
+
 message("PROCESSING COMPLETE")
-message("========================================")
 
 all_outputs <- list.files(local_output, pattern = "\\.tif$", 
                           recursive = TRUE, full.names = FALSE)
@@ -308,10 +301,3 @@ if (length(all_outputs) > 0) {
 } else {
   message("\n⚠ No output files created. Check warnings above.")
 }
-
-message("\n========================================")
-message("Next steps:")
-message("  1. Check output files in: ", local_output)
-message("  2. Run extract_cosmos_metrics_unified.R")
-message("  3. Results ready for Monte Carlo simulation")
-message("========================================\n")

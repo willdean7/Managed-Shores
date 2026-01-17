@@ -856,9 +856,7 @@ if (RUN_SENSITIVITY) {
   message("✓ Saved summary: ", basename(summary_path))
 }
 
-# ==============================================================================
 # CALCULATE BUYOUT ECONOMICS FOR BASELINE
-# ==============================================================================
 
 message("\n→ Calculating buyout economics for BASELINE...")
 baseline_results <- calculate_buyout_economics(baseline_results)
