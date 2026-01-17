@@ -1,4 +1,10 @@
-#The purpose of the script is to pre-process the large CoSMoS datasets to case study locations before integrating them into the Managed Shores model.
+# cosmos_process.R
+# Purpose: Pre-process CoSMoS storm scenarios with selective SLR level filtering
+# Author: Will Dean
+#
+# OPTIMIZATION: Only processes SLR levels needed for OPC 2024 interpolation
+#
+# For each storm scenario, processes flood depth and duration across strategic SLR levels
 
 rm(list = ls())
 library(sf)
@@ -7,214 +13,305 @@ library(stringr)
 library(dplyr)
 library(tools)
 
-# CONFIG 
-external_base <- "/Volumes/TOSHIBA HD/Managed_Shores"   # external drive root
-project_base  <- "~/Documents/Managed_Shores"            # project root
-crs_work      <- 3310                                    # CA Albers (meters)
 
-# Choose the case and AOI here (only place you edit)
-case_name <- "carpinteria"  # change to "silver_strand" to run that site etc...
-case_abbr <- "carp"  
+# CONFIGURATION
+# Paths
+external_base <- "/Volumes/TOSHIBA HD/Managed_Shores"
+project_base  <- "~/Documents/Managed_Shores"
+crs_work      <- 3310  # CA Albers (meters)
 
-# AOI bbox (4326) — set per case
+# Case study selection
+case_name <- "king_salmon"  # Options: carpinteria, king_salmon, silver_strand, isla_vista, pacifica
+case_abbr <- "ks"         # "carp", "ks", "ss", "iv", "pac"
+
+# AOI bounding boxes (WGS84)
 bbox_lookup <- list(
-  carpinteria   = c(xmin=-119.55, ymin=34.38, xmax=-119.52, ymax=34.41),
-  silver_strand = c(xmin=-119.23, ymin=34.14, xmax=-119.21, ymax=34.16) # <- adjust if needed
+  carpinteria   = c(xmin = -119.55, ymin = 34.38, xmax = -119.52, ymax = 34.41),
+  king_salmon   = c(xmin = -124.22463, ymin = 40.73482, xmax = -124.21277, ymax = 40.74378),
+  silver_strand = c(xmin = -119.23, ymin = 34.14, xmax = -119.21, ymax = 34.16),
+  isla_vista    = c(xmin = -119.88, ymin = 34.40, xmax = -119.84, ymax = 34.42),
+  pacifica      = c(xmin = -122.52, ymin = 37.60, xmax = -122.48, ymax = 37.65)
 )
+
 bbox4326 <- st_bbox(bbox_lookup[[case_name]], crs = st_crs(4326))
 
-# Output root
+# Output directory
 local_output <- file.path(project_base, sprintf("data/%s/cosmos", case_name))
 dir.create(local_output, recursive = TRUE, showWarnings = FALSE)
 
-# Expand AOI by 1000 m in working CRS
-bbox_poly_work         <- st_transform(st_as_sfc(bbox4326), crs_work) |> st_buffer(1000)
+message("========================================")
+message("CoSMoS Storm Processing: ", toupper(case_name))
+message("========================================")
+message("AOI: ", paste(names(bbox4326), round(bbox4326, 3), collapse = ", "))
+message("Output: ", local_output)
+message("========================================\n")
+
+# Expand AOI
+bbox_poly_work         <- st_transform(st_as_sfc(bbox4326), crs_work) |> st_buffer(500)
 bbox_poly4326_expanded <- st_transform(bbox_poly_work, 4326)
 
-# helper functions
+
+# SLR LEVEL FILTERING - KEY OPTIMIZATION
+
+# Only process SLR levels needed for OPC 2024 interpolation
+# OPC High scenario goes up to ~2.0m, so we need good coverage from 0-2.5m
+
+# STRATEGY: Process every other level up to 2.0m, then coarser beyond
+SLR_LEVELS_TO_PROCESS <- c(
+  "slr000",  # 0.0m - baseline
+  "slr025",  # 0.25m
+  "slr050",  # 0.5m
+  "slr075",  # 0.75m
+  "slr100",  # 1.0m
+  "slr125",  # 1.25m
+  "slr150",  # 1.5m
+  "slr175",  # 1.75m
+  "slr200",  # 2.0m
+  "slr250",  # 2.5m (for extrapolation safety)
+  "slr300"   # 3.0m (upper bound)
+)
+
+message("SLR OPTIMIZATION:")
+message("  Processing ", length(SLR_LEVELS_TO_PROCESS), " SLR levels (instead of all ~15)")
+message("  Levels: ", paste(SLR_LEVELS_TO_PROCESS, collapse = ", "))
+
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
 crop_raster_to_bbox <- function(r, bbox_poly_4326) {
   b <- st_transform(bbox_poly_4326, crs(r))
   r_c <- terra::crop(r, vect(b))
   terra::mask(r_c, vect(b))
 }
+
 clip_vector_to_bbox <- function(v, bbox_poly_4326) {
   b <- st_transform(bbox_poly_4326, st_crs(v))
   suppressWarnings(st_intersection(v, b))
 }
 
-# Auto-discover scenario folders like ".../slr100_w100_*"
 discover_scenarios <- function(parent_dir) {
-  # find scenario directories that already end with "_flood_depth" or "_flood_duration"
+  if (!dir.exists(parent_dir)) {
+    warning("Directory not found: ", parent_dir)
+    return(character(0))
+  }
+  
   dirs <- list.dirs(parent_dir, full.names = FALSE, recursive = FALSE)
-  dirs <- dirs[grepl("^slr\\d{3}_w\\d{3}_", dirs)]
+  
+  # MATCH both uppercase and lowercase patterns
+  dirs <- dirs[grepl("^slr\\d{3}_w\\d{3}_", dirs, ignore.case = TRUE)]
+  
+  # FILTER to only desired SLR levels (case-insensitive)
+  slr_codes <- tolower(str_extract(dirs, "(?i)^slr\\d{3}"))  # Extract and convert to lowercase
+  dirs <- dirs[slr_codes %in% SLR_LEVELS_TO_PROCESS]
+  
   sort(dirs)
 }
 
-# Generic raster pipeline (continuous fields)
 merge_crop_save <- function(tile_dir, out_dir, out_stub, mosaic_fun = max) {
+  
   tif_files <- list.files(tile_dir, pattern = "\\.tif$", full.names = TRUE)
+  
   if (!length(tif_files)) { 
-    message("No .tif files in: ", tile_dir)
+    message("  ⚠ No .tif files found in: ", tile_dir)
     return(invisible(NULL)) 
   }
-  message("Merging ", length(tif_files), " tiles in: ", tile_dir)
+  
+  # FILTER to only HU07 and HU08 tiles for King Salmon case study
+  if (case_name == "king_salmon") {
+    tif_files <- tif_files[grepl("HU0[78]_", basename(tif_files))]
+    
+    if (!length(tif_files)) {
+      message("  ⚠ No HU07 or HU08 tiles found")
+      return(invisible(NULL))
+    }
+    message("  → Processing ", length(tif_files), " tiles (HU07-HU08 only for King Salmon)...")
+  } else {
+    message("  → Processing ", length(tif_files), " tiles...")
+  }
   
   # Read and project rasters with error handling
   rs <- list()
   for (i in seq_along(tif_files)) {
     tryCatch({
       r <- terra::rast(tif_files[i])
+      
+      # CRITICAL: Convert to float and divide by 100 to get meters
+      # Original data is in centimeters stored as INT4U
+      r <- r / 100.0
+      
+      # Set values < 0.01 (1 cm) to NA (likely noise/nodata)
+      r[r < 0.01] <- NA
+      
       if (!is.null(r) && inherits(r, "SpatRaster")) {
-        r_proj <- terra::project(r, paste0("EPSG:", crs_work))
+        r_proj <- terra::project(r, paste0("EPSG:", crs_work), method = "bilinear")
         if (!is.null(r_proj) && inherits(r_proj, "SpatRaster")) {
           rs[[length(rs) + 1]] <- r_proj
-        } else {
-          warning("Projection failed for: ", basename(tif_files[i]))
         }
-      } else {
-        warning("Skipping invalid raster: ", basename(tif_files[i]))
       }
     }, error = function(e) {
-      warning("Error reading ", basename(tif_files[i]), ": ", e$message)
+      warning("    Error reading ", basename(tif_files[i]), ": ", e$message)
     })
   }
   
   if (length(rs) == 0) {
-    message("No valid rasters found in: ", tile_dir)
+    message("  ⚠ No valid rasters after projection")
     return(invisible(NULL))
   }
   
-  message("Successfully processed ", length(rs), " out of ", length(tif_files), " tiles")
-  
-  # Align all rasters to the first one
-  template   <- rs[[1]]
+  # Align all rasters to first one
+  template <- rs[[1]]
   rs_aligned <- lapply(rs, function(r) {
     if (!terra::compareGeom(r, template, stopOnError = FALSE)) {
       terra::resample(r, template, method = "bilinear")
-    } else r
+    } else {
+      r
+    }
   })
   
   fun <- if (is.character(mosaic_fun)) match.fun(mosaic_fun) else mosaic_fun
   
-  # Merge rasters using a safer approach
-  message("Mosaicking ", length(rs_aligned), " aligned rasters...")
+  # Merge rasters
+  message("  → Mosaicking ", length(rs_aligned), " tiles...")
   merged <- if (length(rs_aligned) == 1) {
     rs_aligned[[1]]
   } else {
-    # Use terra's SpatRasterCollection instead of Reduce
     src <- terra::sprc(rs_aligned)
     terra::mosaic(src, fun = fun)
   }
   
-  message("Mosaic complete, cropping to AOI...")
+  # Crop to AOI
+  message("  → Cropping to AOI...")
   cropped <- crop_raster_to_bbox(merged, bbox_poly4326_expanded)
+  
+  # Save
   dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
   out_path <- file.path(out_dir, paste0(out_stub, ".tif"))
-  terra::writeRaster(cropped, out_path, overwrite = TRUE)
-  message("  → saved: ", out_path)
-  out_path
-}
-
-# SOURCE ROOTS
-flood_depth_base <- file.path(external_base, "CoSMoS_v3_Phase2_average_conditions_flood_depth_and_duration_sb", "flood_depth")
-flood_dur_base   <- file.path(external_base, "CoSMoS_v3_Phase2_average_conditions_flood_depth_and_duration_sb", "flood_duration")
-wave_ht_base     <- file.path(external_base, "wave_ht_sb")
-runup_base       <- file.path(external_base, "CoSMoS_runup_socal")
-cliff_base       <- file.path(external_base, "CoSMoS_cliff_retreat_projections_socal")
-squeeze_base     <- file.path(external_base, "CoSMoS_coastal_squeeze_socal")
-shore_base       <- file.path(external_base, "CoSMoS_shoreline_change_projections_socal")
-
-# FLOOD DEPTH 
-flood_depth_out  <- file.path(local_output, "flood_depth")
-dir.create(flood_depth_out, recursive = TRUE, showWarnings = FALSE)
-slr_steps <- discover_scenarios(flood_depth_base)
-
-for (s in slr_steps) {
-  src_dir <- file.path(flood_depth_base, s)
-  merge_crop_save(src_dir, flood_depth_out, paste0("flood_depth_", s, "_", case_abbr), mosaic_fun = max)
-}
-
-# FLOOD DURATION
-flood_dur_out <- file.path(local_output, "flood_duration")
-dir.create(flood_dur_out, recursive = TRUE, showWarnings = FALSE)
-slr_steps_dur <- discover_scenarios(flood_dur_base)
-
-for (s in slr_steps_dur) {
-  src_dir <- file.path(flood_dur_base, s)
-  merge_crop_save(src_dir, flood_dur_out, paste0("flood_duration_", s, "_", case_abbr), mosaic_fun = max)
-}
-
-# WAVE HEIGHT 
-wave_ht_out <- file.path(local_output, "wave_ht")
-dir.create(wave_ht_out, recursive = TRUE, showWarnings = FALSE)
-
-
-process_wave_ht <- function(slr_step) {
-  cat("Processing wave height:", slr_step, "\n")
-  scenario_folder <- file.path(wave_ht_base, paste0(slr_step, "_waves"))
-  tif_files <- list.files(scenario_folder, pattern = "\\.tif$", full.names = TRUE)
-  if (!length(tif_files)) { cat("  No TIFFs in ", scenario_folder, "\n\n"); return(NULL) }
+  terra::writeRaster(cropped, out_path, overwrite = TRUE,
+                     filetype = "GTiff",
+                     datatype = "FLT4S",
+                     gdal = c("COMPRESS=LZW", "TILED=YES", "BIGTIFF=IF_SAFER"))
   
-  # read + project
-  rs <- lapply(tif_files, function(p) terra::project(terra::rast(p), paste0("EPSG:", crs_work)))
-  template <- rs[[1]]
-  rs_aligned <- lapply(rs, function(r) {
-    if (!isTRUE(terra::compareGeom(r, template, stopOnError = FALSE))) {
-      terra::resample(r, template, method = "bilinear")
-    } else r
-  })
+  message("  ✓ Saved: ", basename(out_path))
+  return(out_path)
+}
+
+process_storm_metric <- function(base_dir, out_dir, metric_name) {
   
-  if (length(rs_aligned) == 1) {
-    merged <- rs_aligned[[1]]
-  } else {
-    src <- terra::sprc(rs_aligned)
-    merged <- terra::mosaic(src, fun = max)
+  if (!dir.exists(base_dir)) {
+    warning("Storm directory not found: ", base_dir)
+    return(invisible(NULL))
   }
   
-  cropped <- crop_raster_to_bbox(merged, bbox_poly4326_expanded)
+  scenarios <- discover_scenarios(base_dir)
   
-  out_file <- file.path(wave_ht_out, paste0("wave_ht_", slr_step, "_", case_abbr, ".tif"))
-  terra::writeRaster(
-    cropped, out_file, overwrite = TRUE,
-    filetype = "GTiff",
-    gdal = c("COMPRESS=LZW","TILED=YES","BIGTIFF=IF_SAFER")
+  if (length(scenarios) == 0) {
+    message("  ⚠ No scenarios found in: ", base_dir)
+    return(invisible(NULL))
+  }
+  
+  message("  Found ", length(scenarios), " scenarios (filtered from all available)")
+  
+  for (s in scenarios) {
+    message("\n  Scenario: ", s)
+    src_dir <- file.path(base_dir, s)
+    out_stub <- paste0(metric_name, "_", s, "_", case_abbr)
+    merge_crop_save(src_dir, out_dir, out_stub, mosaic_fun = max)
+  }
+  
+  invisible(NULL)
+}
+
+# ============================================================================
+# STORM SCENARIO PROCESSING
+# change the folder names for each case study
+# ============================================================================
+
+storm_configs <- list(
+  annual = list(
+    name = "1-year storm (annual)",
+    folder = "CoSMoS_1yr_storm_flood_depth_and_duration_king_salmon",
+    abbrev = "1yr"
+  ),
+  storm_20yr = list(
+    name = "20-year storm",
+    folder = "CoSMoS_20yr_storm_flood_depth_and_duration_king_salmon",
+    abbrev = "20yr"
+  ),
+  storm_100yr = list(
+    name = "100-year storm",
+    folder = "CoSMoS_100yr_storm_flood_depth_and_duration_king_salmon",
+    abbrev = "100yr"
   )
-  cat("  Saved:", out_file, "\n\n")
-  out_file
+)
+
+
+for (storm_type in names(storm_configs)) {
+  
+  config <- storm_configs[[storm_type]]
+  
+  message("\n========================================")
+  message("PROCESSING: ", toupper(config$name))
+  message("========================================\n")
+  
+  storm_base <- file.path(external_base, config$folder)
+  
+  if (!dir.exists(storm_base)) {
+    warning("Storm base directory not found: ", storm_base)
+    warning("Skipping ", config$name)
+    next
+  }
+  
+  # --- FLOOD DEPTH ---
+  message("Processing flood depth...")
+  depth_base <- file.path(storm_base, "flood_depth")
+  depth_out  <- file.path(local_output, paste0("storm_", config$abbrev, "_depth"))
+  process_storm_metric(depth_base, depth_out, "flood_depth")
+  
+  # --- FLOOD DURATION ---
+  message("\nProcessing flood duration...")
+  duration_base <- file.path(storm_base, "flood_duration")
+  duration_out  <- file.path(local_output, paste0("storm_", config$abbrev, "_duration"))
+  process_storm_metric(duration_base, duration_out, "flood_duration")
+  
+  message("\n✓ Completed: ", config$name, "\n")
 }
 
-slr_steps <- sub("_waves$", "", discover_scenarios(wave_ht_base))
-invisible(lapply(slr_steps, process_wave_ht))
+# ============================================================================
+# SUMMARY
+# ============================================================================
 
-# RUNUP (vectors)
-runup_out <- file.path(local_output, "runup"); dir.create(runup_out, TRUE, FALSE)
-runup_shps <- list.files(runup_base, pattern = "\\.shp$", full.names = TRUE, recursive = TRUE)
+message("\n========================================")
+message("PROCESSING COMPLETE")
+message("========================================")
 
-# Filter to only process w000 and w100 scenarios
-runup_storms_to_process <- c("w000", "w100")
+all_outputs <- list.files(local_output, pattern = "\\.tif$", 
+                          recursive = TRUE, full.names = FALSE)
 
-if (length(runup_shps)) {
-  for (shp in runup_shps) {
-    nm   <- file_path_sans_ext(basename(shp))
-    scen <- str_to_lower(str_extract(nm, "SLR\\d{3}_W\\d{3}"))
+if (length(all_outputs) > 0) {
+  message("\nCreated ", length(all_outputs), " raster files:")
+  
+  for (storm_type in names(storm_configs)) {
+    config <- storm_configs[[storm_type]]
+    storm_files <- all_outputs[grepl(config$abbrev, all_outputs)]
     
-    # Extract storm code to check if we should process this file
-    storm_code <- str_extract(scen, "w\\d{3}")
-    
-    if (is.na(scen) || is.na(storm_code) || !storm_code %in% runup_storms_to_process) {
-      message("Skipping runup scenario (not w000/w100): ", nm)
-      next
+    if (length(storm_files) > 0) {
+      message("\n", config$name, " (", length(storm_files), " files):")
+      for (f in sort(storm_files)) {
+        message("  - ", f)
+      }
     }
-    
-    out_dir <- file.path(runup_out, scen); dir.create(out_dir, TRUE, FALSE)
-    
-    v <- suppressMessages(st_read(shp, quiet = TRUE))
-    v_clip <- clip_vector_to_bbox(v, bbox_poly4326_expanded)
-    
-    if (nrow(v_clip)) {
-      out_path <- file.path(out_dir, paste0(nm, "_", case_abbr, ".shp"))
-      suppressMessages(st_write(v_clip, out_path, delete_dsn = TRUE, quiet = TRUE))
-      message("Runup → ", out_path)
-    } else message("Runup (no features in AOI): ", nm)
   }
-} else message("No runup shapefiles found at: ", runup_base)
+  
+  message("\n✓ All outputs saved to: ", local_output)
+  
+} else {
+  message("\n⚠ No output files created. Check warnings above.")
+}
+
+message("\n========================================")
+message("Next steps:")
+message("  1. Check output files in: ", local_output)
+message("  2. Run extract_cosmos_metrics_unified.R")
+message("  3. Results ready for Monte Carlo simulation")
+message("========================================\n")

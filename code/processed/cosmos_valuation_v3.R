@@ -2,11 +2,39 @@
 # Purpose: Calculate optimal retreat year T* using flood NPV and cliff retreat distance
 # Author: Will Dean (Managed Shores)
 #
+# MODEL FRAMING:
+#   This model calculates economically optimal retreat timing (T*) based on NPV analysis.
+#   
+#   NPV Calculation:
+#     NPV(staying) = Rental Income - Flood Damages
+#     T* = year when NPV(staying) ≤ 0 (economically unsustainable)
+#     
+#     Note: Tenant (former owner) covers normal property maintenance and wear-and-tear
+#     as part of standard lease agreement. Government only pays for flood damages.
+#   
+#   Buyout-Leaseback Pricing:
+#     Buyout Price = NPV(future rental income from year 1 to T*) + Land Value
+#     - Compensates owner for lost rental income stream and land
+#     - Does NOT pay for structure value (economically obsolete at T*)
+#     - Government leases property back to owner, receives rental income
+#     - Eventually acquires land when structure fails
+#   
+#   Leaseback Structure:
+#     - Tenant (former owner) pays market rent
+#     - Tenant covers normal property maintenance (standard lease terms)
+#     - Government (landlord) responsible only for major structural issues from flooding
+#     - This is the standard landlord-tenant model used throughout rental markets
+#   
+#   Results provide retreat timing estimates and buyout costs for various scenarios.
+#   Governments can use these to inform buyout-leaseback program design.
+#
 # Key Features:
 #   - Literature-based cliff thresholds (10m minimum safety, 25m planned retreat)
 #   - Handles properties already within threshold
 #   - Unified script for flood-only, cliff-only, and hybrid sites
 #   - Storm scenarios - ONLY affect flood sites, not cliff sites
+#   - Monte Carlo simulation for stochastic storm modeling
+#   - NPV-based buyout pricing (economic value vs. market fiction)
 #
 # Input:
 #   - data/{site}/derived/cosmos_annual_hazards.csv (from interpolate_cosmos.R)
@@ -18,6 +46,8 @@
 #   - data/{site}/derived/retreat_schedule_sensitivity.csv
 #   - data/{site}/derived/sensitivity_summary.csv
 #   - data/{site}/derived/retreat_schedule_summary.txt
+#   - data/{site}/derived/mc_distributions_baseline.csv (if Monte Carlo enabled)
+#   - data/{site}/derived/community_stats_baseline.json
 
 rm(list = ls())
 library(dplyr)
@@ -25,10 +55,12 @@ library(tidyr)
 library(readr)
 library(purrr)
 library(stringr)
+library(jsonlite)  # For saving community stats to JSON
 
+source("code/processed/monte_carlo_storms.R") 
 
 # CONFIGURATION
-case_name <- "pacifica"  # Change for other sites
+case_name <- "king_salmon"  # Change for other sites
 data_dir <- file.path("data", case_name)
 derived_dir <- file.path(data_dir, "derived")
 
@@ -52,20 +84,81 @@ BASELINE <- list(
   rental_yield = 0.05,      # 5% annual yield (industry benchmark)
   discount_rate = 0.02,     # 2% (appropriate for government planning)
   damage_threshold = 0.15,  # 15cm (accounts for nuisance flooding)
-  owner_utility = 0,        # $0/year (conservative baseline)
   cliff_scenario = "LetItGo"  # Natural retreat (vs HoldTheLine for sensitivity)
 )
 
-# SENSITIVITY ANALYSIS 
-RUN_SENSITIVITY <- TRUE  # Set FALSE for faster baseline-only runs
+# MONTE CARLO CONFIGURATION
+RUN_MONTE_CARLO <- TRUE   # Set FALSE to use deterministic baseline
+N_MC_SIMS <- 1000        # Number of simulations (10,000 for publication)
 
-SENSITIVITY_PARAMS <- list(
-  rental_yield = c(0.04, 0.05, 0.06),           # 4%, 5%, 6%
-  discount_rate = c(0.015, 0.02, 0.03),         # 1.5%, 2%, 3%
-  damage_threshold = c(0.0, 0.15, 0.30),        # 0cm, 15cm, 30cm (for flood sites)
-  owner_utility = c(0, 25000, 50000),           # $0, $25K, $50K per year
-  cliff_scenario = c("LetItGo", "HoldTheLine")  # Natural retreat vs armoring
-)
+if (RUN_MONTE_CARLO) {
+  message("\nMONTE CARLO: ENABLED")
+  message("  Simulations per property: ", N_MC_SIMS)
+} else {
+  message("\nMONTE CARLO: DISABLED (using deterministic baseline)")
+}
+
+# SENSITIVITY ANALYSIS 
+RUN_SENSITIVITY <- TRUE  # can toggle for quicker testing
+
+# SMART SENSITIVITY DESIGN:
+# Instead of full factorial (324 combinations), use targeted comparisons
+# Provides all data for thesis tables/figures in ~1.5 hours instead of 15 hours
+
+# Create smart parameter grid
+create_smart_sensitivity_grid <- function() {
+  
+  # Helper to create parameter set
+  make_params <- function(disc, thresh, yield = 0.05) {
+    tibble(
+      rental_yield = yield,
+      discount_rate = disc,
+      damage_threshold = thresh
+    )
+  }
+  
+  # TIER 1: Discount rate sensitivity
+  tier1 <- bind_rows(
+    make_params(disc = 0.015, thresh = 0.15, yield = 0.05),
+    make_params(disc = 0.020, thresh = 0.15, yield = 0.05),
+    make_params(disc = 0.030, thresh = 0.15, yield = 0.05)
+  )
+  
+  # TIER 2: Damage threshold sensitivity
+  tier2 <- bind_rows(
+    make_params(disc = 0.02, thresh = 0.15, yield = 0.05),
+    make_params(disc = 0.02, thresh = 0.30, yield = 0.05)
+  )
+  
+  # TIER 3: Rental yield sensitivity
+  tier3 <- bind_rows(
+    make_params(disc = 0.02, thresh = 0.15, yield = 0.03),
+    make_params(disc = 0.02, thresh = 0.15, yield = 0.04),
+    make_params(disc = 0.02, thresh = 0.15, yield = 0.05),
+    make_params(disc = 0.02, thresh = 0.15, yield = 0.06)
+  )
+  
+  # Combine and remove duplicates
+  bind_rows(tier1, tier2, tier3) %>% distinct()
+}
+
+SENSITIVITY_GRID <- create_smart_sensitivity_grid()
+
+message("\n=== STREAMLINED SENSITIVITY DESIGN ===")
+message("Total combinations (per cliff scenario): ", nrow(SENSITIVITY_GRID))
+message("\nTiers:")
+message("  1. Discount rates: 1.5%, 2%, 3%")  
+message("  2. Damage thresholds: 0.15m (baseline), 0.3m (high tolerance)")
+message("  3. Rental yields: 3%, 4%, 5%, 6%")
+message("\nFor sites WITH cliffs (Isla Vista, Pacifica):")
+message("  Each combination tested with LetItGo AND HoldTheLine")
+message("  Total: ", nrow(SENSITIVITY_GRID), " × 2 cliff scenarios = ", nrow(SENSITIVITY_GRID) * 2)
+message("\nFor sites WITHOUT cliffs")
+message("  Cliff scenario fixed to LetItGo")
+message("  Total: ", nrow(SENSITIVITY_GRID), " combinations")
+message("\nEstimated runtime:")
+message("  No cliffs: ~", round(nrow(SENSITIVITY_GRID) * 3 / 60, 1), " hours")
+message("  Pacifica/Isla Vista (with cliffs): ~", round(nrow(SENSITIVITY_GRID) * 2 * 3 / 60, 1), " hours")
 
 
 message("CoSMoS Retreat Year Calculation: ", toupper(case_name))
@@ -79,7 +172,6 @@ message("\nBASELINE PARAMETERS:")
 message("  Rental yield: ", BASELINE$rental_yield * 100, "%")
 message("  Discount rate: ", BASELINE$discount_rate * 100, "%")
 message("  Damage threshold: ", BASELINE$damage_threshold, "m (for flood sites)")
-message("  Owner utility: $", format(BASELINE$owner_utility, big.mark = ","), "/year")
 message("  Cliff scenario: ", BASELINE$cliff_scenario)
 
 if (RUN_SENSITIVITY) {
@@ -87,8 +179,6 @@ if (RUN_SENSITIVITY) {
 } else {
   message("\nSENSITIVITY ANALYSIS: DISABLED")
 }
-message("========================================\n")
-
 
 # LOAD DATA
 hazards_path <- file.path(derived_dir, "cosmos_annual_hazards.csv")
@@ -124,6 +214,46 @@ message("  Years: ", min(hazards$year), "-", max(hazards$year), "\n")
 if ("slr_scenario" %in% names(hazards) && !"scenario" %in% names(hazards)) {
   hazards <- hazards %>% rename(scenario = slr_scenario)
 }
+
+# LOAD STORM DATA FOR MONTE CARLO
+if (RUN_MONTE_CARLO && site_type %in% c("FLOOD-ONLY", "HYBRID (flood + cliff)")) {
+  
+  message("\n→ Loading storm scenario data...")
+  
+  storm_annual_path <- file.path(derived_dir, "storm_annual.csv")
+  storm_20yr_path <- file.path(derived_dir, "storm_20yr.csv")
+  storm_100yr_path <- file.path(derived_dir, "storm_100yr.csv")
+  
+  if (all(file.exists(c(storm_annual_path, storm_20yr_path, storm_100yr_path)))) {
+    
+    storm_data_list <- list(
+      annual = read_csv(storm_annual_path, show_col_types = FALSE),
+      storm_20yr = read_csv(storm_20yr_path, show_col_types = FALSE),
+      storm_100yr = read_csv(storm_100yr_path, show_col_types = FALSE)
+    )
+    
+    message("✓ Loaded storm data:")
+    message("  Annual storms: ", nrow(storm_data_list$annual), " rows")
+    message("  20-year storms: ", nrow(storm_data_list$storm_20yr), " rows")
+    message("  100-year storms: ", nrow(storm_data_list$storm_100yr), " rows")
+    
+  } else {
+    warning("Monte Carlo enabled but storm data files not found:")
+    warning("  Expected: ", derived_dir, "/storm_*.csv")
+    warning("  Falling back to deterministic mode")
+    storm_data_list <- NULL
+    RUN_MONTE_CARLO <- FALSE
+  }
+  
+} else {
+  
+  if (RUN_MONTE_CARLO) {
+    message("\n→ Monte Carlo not applicable (cliff-only site)")
+  }
+  storm_data_list <- NULL
+  
+}
+
 
 # Load property data
 props_path <- file.path(data_dir, "redfin_df.csv")
@@ -199,7 +329,7 @@ npv_damages <- function(t, T, depth_vec, strval, params, beta, threshold) {
 # CORE RETREAT CALCULATION FUNCTION
 
 calc_tstar_one <- function(prop_id, scenario_name, cliff_scen_name, hazards_df, props_df, 
-                           rental_yield, discount_rate, damage_threshold, owner_utility, 
+                           rental_yield, discount_rate, damage_threshold, 
                            site_type) {
   
   # Get hazard timeline for this property × scenario
@@ -241,32 +371,6 @@ calc_tstar_one <- function(prop_id, scenario_name, cliff_scen_name, hazards_df, 
   initial_cliff_dist <- NA_real_
   cliff_exposure_status <- "not_applicable"
   
-  # ===== FLOOD TRIGGER =====
-  # For flood sites: Use average annual conditions (depth_m)
-  # NOTE: Storm scenarios (w000 vs w100) removed from baseline
-  #       CoSMoS depth_m already represents expected annual flooding
-  #       For future Monte Carlo work, storm draws will happen per-year
-  
-  if (site_type %in% c("FLOOD-ONLY", "HYBRID (flood + cliff)")) {
-    
-    # Use annual average flood depth (depth_m column)
-    # If depth_m_w100 exists, could use for sensitivity analysis
-    depth_ts <- prop_hazards$depth_m
-    
-    if (!all(is.na(depth_ts)) && !all(depth_ts == 0, na.rm = TRUE)) {
-      for (t in 1:bigT) {
-        npv_r <- npv_rent(t, bigT, rent_val, beta)
-        npv_utility <- npv_rent(t, bigT, owner_utility, beta)
-        npv_d <- npv_damages(t, bigT, depth_ts, str_val, depth_params, beta, damage_threshold)
-        
-        npv_staying <- npv_r + npv_utility - npv_d
-        if (is.finite(npv_staying) && npv_staying <= 0) {
-          t_flood <- t
-          break
-        }
-      }
-    }
-  }
   
   # ===== CLIFF TRIGGER =====
   # For cliff sites: Based purely on distance thresholds
@@ -367,13 +471,12 @@ calc_tstar_one <- function(prop_id, scenario_name, cliff_scen_name, hazards_df, 
 }
 
 # Wrapper function
-run_scenario <- function(rental_yield, discount_rate, damage_threshold, owner_utility, 
+run_scenario <- function(rental_yield, discount_rate, damage_threshold,  
                          cliff_scenario, scenario_label = "custom") {
   
   message("\n→ Running: ", scenario_label)
   message("  Parameters: yield=", rental_yield*100, "%, disc=", discount_rate*100, 
-          "%, thresh=", damage_threshold, "m, util=$", owner_utility/1000, "K, ",
-          "cliff=", cliff_scenario)
+          "%, thresh=", damage_threshold, "m, cliff=", cliff_scenario)
   
   slr_scenarios <- unique(hazards$scenario)
   parcel_ids <- unique(hazards$parcel_id)
@@ -385,65 +488,228 @@ run_scenario <- function(rental_yield, discount_rate, damage_threshold, owner_ut
   }
   
   results_list <- list()
+  mc_distributions_list <- list()  # NEW: Collect MC distributions separately
   
   for (slr_scen in slr_scenarios) {
     for (cliff_scen in cliff_scenarios) {
       
-      scenario_results <- map_dfr(
-        parcel_ids,
-        ~ calc_tstar_one(.x, slr_scen, cliff_scen, hazards, props,
-                         rental_yield, discount_rate, damage_threshold, 
-                         owner_utility, site_type)
-      )
+      # Choose Monte Carlo or Deterministic based on configuration
+      if (RUN_MONTE_CARLO && !is.null(storm_data_list)) {
+        
+        # MONTE CARLO MODE
+        scenario_results_with_attrs <- map(
+          parcel_ids,
+          ~ calc_tstar_monte_carlo(
+            prop_id = .x,
+            scenario_name = slr_scen,
+            cliff_scen_name = cliff_scen,
+            hazards_df = hazards,
+            props_df = props,
+            storm_data_list = storm_data_list,
+            n_sims = N_MC_SIMS,
+            rental_yield = rental_yield,
+            discount_rate = discount_rate,
+            damage_threshold = damage_threshold,
+            site_type = site_type,
+            bigT = bigT,
+            depth_params = depth_params
+          )
+        )
+        
+        # Extract distributions before binding rows
+        for (i in seq_along(scenario_results_with_attrs)) {
+          result_row <- scenario_results_with_attrs[[i]]
+          dist <- attr(result_row, "mc_distribution")
+          
+          if (!is.null(dist) && length(dist) > 0) {
+            mc_distributions_list[[length(mc_distributions_list) + 1]] <- tibble(
+              parcel_id = result_row$parcel_id,
+              scenario = slr_scen,
+              cliff_scenario = cliff_scen,
+              sim_num = 1:length(dist),
+              retreat_year = dist
+            )
+          }
+        }
+        
+        # Bind rows (this loses attributes but we've saved them)
+        scenario_results <- bind_rows(scenario_results_with_attrs)
+        
+      } else {
+        
+        # DETERMINISTIC MODE
+        scenario_results <- map_dfr(
+          parcel_ids,
+          ~ calc_tstar_one(.x, slr_scen, cliff_scen, hazards, props,
+                           rental_yield, discount_rate, damage_threshold, 
+                           site_type)
+        )
+        
+        # Add placeholder MC columns for consistency
+        scenario_results <- scenario_results %>%
+          mutate(
+            mc_enabled = FALSE,
+            mc_n_sims = 0,
+            mc_mean_year = T_star,
+            mc_median_year = T_star,
+            mc_sd_year = 0,
+            mc_q05_year = T_star,
+            mc_q25_year = T_star,
+            mc_q75_year = T_star,
+            mc_q95_year = T_star,
+            mc_range_years = 0
+          )
+      }
       
       key <- paste(slr_scen, cliff_scen, sep = "_")
       results_list[[key]] <- scenario_results
     }
   }
   
-  retreat_schedule <- bind_rows(results_list) %>%
-    rename(retreat_year = T_star) %>%
+  retreat_schedule <- bind_rows(results_list)
+  
+  # Handle column naming (Monte Carlo returns retreat_year, deterministic returns T_star)
+  if ("T_star" %in% names(retreat_schedule) && !"retreat_year" %in% names(retreat_schedule)) {
+    retreat_schedule <- retreat_schedule %>% rename(retreat_year = T_star)
+  }
+  
+  retreat_schedule <- retreat_schedule %>%
     mutate(
       parameter_set = scenario_label,
       rental_yield = rental_yield,
       discount_rate = discount_rate,
-      damage_threshold = damage_threshold,
-      owner_utility = owner_utility
+      damage_threshold = damage_threshold
     )
   
   # Add property details
   retreat_schedule <- retreat_schedule %>%
     left_join(
       props %>% select(
-        parcel_id, ADDRESS, PRICE, strval, landval, 
+        parcel_id, ADDRESS, PRICE, strval, landval, elevation, 
         LATITUDE, LONGITUDE
       ),
       by = "parcel_id"
     ) %>%
     mutate(rent = PRICE * rental_yield)
   
-  return(retreat_schedule)
+  # Combine MC distributions if they exist
+  mc_distributions_df <- NULL
+  if (length(mc_distributions_list) > 0) {
+    mc_distributions_df <- bind_rows(mc_distributions_list)
+    mc_distributions_df <- mc_distributions_df %>%
+      mutate(
+        parameter_set = scenario_label,
+        rental_yield = rental_yield,
+        discount_rate = discount_rate,
+        damage_threshold = damage_threshold
+      )
+  }
+  
+  # Return both results and distributions
+  return(list(
+    results = retreat_schedule,
+    mc_distributions = mc_distributions_df
+  ))
+}
+
+
+# ==============================================================================
+# BUYOUT ECONOMICS CALCULATION (reusable for baseline and sensitivity)
+# ==============================================================================
+
+calculate_buyout_economics <- function(df) {
+  
+  message("  Calculating buyout prices for ", nrow(df), " rows...")
+  
+  df %>%
+    mutate(
+      # Calculate NPV of rental income from year 1 to T*
+      # Uses the discount_rate column already in the dataframe
+      npv_rent_to_tstar = mapply(
+        function(rent, T, discount_rate) {
+          if (T <= 0) return(0)
+          if (T > bigT) return(NA_real_)
+          beta <- 1 / (1 + discount_rate)
+          rent * (1 - beta^T) / (1 - beta)
+        },
+        rent, retreat_year, discount_rate
+      ),
+      
+      # BUYOUT PRICE: NPV of future rent stream + land value, CAPPED at market price
+      buyout_price_uncapped = npv_rent_to_tstar + landval,
+      
+      buyout_price = if_else(
+        retreat_year <= bigT,
+        pmin(npv_rent_to_tstar + landval, PRICE),  # Cap at market
+        NA_real_
+      ),
+      
+      # Track which properties were capped
+      buyout_capped = if_else(
+        retreat_year <= bigT,
+        buyout_price_uncapped > PRICE,
+        NA
+      ),
+      
+      # Comparison metrics
+      buyout_market_100pct = if_else(retreat_year <= bigT, PRICE, NA_real_),
+      
+      buyout_savings_pct = if_else(
+        retreat_year <= bigT,
+        100 * (1 - buyout_price / PRICE),
+        NA_real_
+      ),
+      
+      buyout_savings_dollars = if_else(
+        retreat_year <= bigT,
+        PRICE - buyout_price,
+        NA_real_
+      ),
+      
+      # GOVERNMENT ECONOMICS
+      gov_rent_collected = npv_rent_to_tstar,
+      gov_land_recovered = landval,
+      gov_net_cost = if_else(
+        retreat_year <= bigT,
+        buyout_price - gov_rent_collected - gov_land_recovered,
+        NA_real_
+      ),
+      
+      # Government outcome category
+      gov_outcome = case_when(
+        is.na(gov_net_cost) ~ NA_character_,
+        gov_net_cost < 0 ~ "profit",
+        gov_net_cost == 0 ~ "break_even",
+        gov_net_cost <= landval * 0.1 ~ "near_break_even",
+        TRUE ~ "net_cost"
+      )
+    )
 }
 
 
 # RUN BASELINE SCENARIO
-baseline_results <- run_scenario(
+baseline_output <- run_scenario(
   rental_yield = BASELINE$rental_yield,
   discount_rate = BASELINE$discount_rate,
   damage_threshold = BASELINE$damage_threshold,
-  owner_utility = BASELINE$owner_utility,
   cliff_scenario = BASELINE$cliff_scenario,
   scenario_label = "baseline"
 )
 
+# Extract results and distributions
+baseline_results <- baseline_output$results
+baseline_mc_distributions <- baseline_output$mc_distributions
+
 # Note: baseline_results will be saved AFTER buyout calculation
 
 # BASELINE SUMMARY
-message("\n========================================")
-message("BASELINE RESULTS SUMMARY")
-message("========================================\n")
 
 message("Total properties: ", n_distinct(baseline_results$parcel_id))
+
+# Monte Carlo summary if enabled
+if (RUN_MONTE_CARLO && sum(baseline_results$mc_enabled, na.rm = TRUE) > 0) {
+  print_mc_summary(baseline_results)
+}
 
 # Trigger summary
 trigger_summary <- baseline_results %>%
@@ -493,22 +759,29 @@ if (nrow(retreating) > 0) {
 # RUN SENSITIVITY ANALYSIS
 if (RUN_SENSITIVITY) {
   
-  message("\n========================================")
   message("RUNNING SENSITIVITY ANALYSIS")
-  message("========================================\n")
+  if (RUN_MONTE_CARLO) {
+    message("NOTE: Monte Carlo is enabled - each scenario takes ~2-3 min")
+  } else {
+    message("Using deterministic mode")
+  }
   
-  param_grid <- expand.grid(
-    rental_yield = SENSITIVITY_PARAMS$rental_yield,
-    discount_rate = SENSITIVITY_PARAMS$discount_rate,
-    damage_threshold = SENSITIVITY_PARAMS$damage_threshold,
-    owner_utility = SENSITIVITY_PARAMS$owner_utility,
-    cliff_scenario = if (has_cliff_scenario) SENSITIVITY_PARAMS$cliff_scenario else NA,
-    stringsAsFactors = FALSE
-  )
+  # Use the smart grid
+  param_grid <- SENSITIVITY_GRID
   
-  if (!has_cliff_scenario) {
-    param_grid <- param_grid %>% select(-cliff_scenario)
-    param_grid$cliff_scenario <- NA
+  # Add cliff_scenario column
+  # For sites WITH cliffs: test both LetItGo and HoldTheLine
+  # For sites WITHOUT cliffs: only LetItGo (cliffs not relevant)
+  if (has_cliff_scenario) {
+    # Expand grid to include both cliff scenarios
+    param_grid <- bind_rows(
+      param_grid %>% mutate(cliff_scenario = "LetItGo"),
+      param_grid %>% mutate(cliff_scenario = "HoldTheLine")
+    )
+    message("Site has cliff properties - testing both cliff scenarios")
+  } else {
+    param_grid$cliff_scenario <- "LetItGo"
+    message("Site has no cliff properties - cliff scenario fixed to LetItGo")
   }
   
   message("Total combinations: ", nrow(param_grid), "\n")
@@ -519,37 +792,47 @@ if (RUN_SENSITIVITY) {
     params <- param_grid[i, ]
     
     label <- sprintf(
-      "y%.2f_d%.3f_t%.2f_u%d_%s",
+      "y%.2f_d%.3f_t%.2f_%s",
       params$rental_yield,
       params$discount_rate,
       params$damage_threshold,
-      params$owner_utility,
       ifelse(is.na(params$cliff_scenario), "NA", params$cliff_scenario)
     )
     
-    results <- run_scenario(
+    output <- run_scenario(
       rental_yield = params$rental_yield,
       discount_rate = params$discount_rate,
       damage_threshold = params$damage_threshold,
-      owner_utility = params$owner_utility,
       cliff_scenario = params$cliff_scenario,
       scenario_label = label
     )
     
-    sensitivity_results_list[[i]] <- results
+    sensitivity_results_list[[i]] <- output$results
+    
+    # Optionally save MC distributions for sensitivity scenarios
+    # (commented out by default to save space - can enable if needed)
+    # if (!is.null(output$mc_distributions)) {
+    #   mc_path <- file.path(derived_dir, paste0("mc_distributions_", label, ".csv"))
+    #   write_csv(output$mc_distributions, mc_path)
+    # }
   }
   
   sensitivity_results <- bind_rows(sensitivity_results_list)
   
+  # CALCULATE BUYOUT ECONOMICS FOR SENSITIVITY
+  message("\n→ Calculating buyout economics for SENSITIVITY...")
+  sensitivity_results <- calculate_buyout_economics(sensitivity_results)
+  
   sensitivity_path <- file.path(derived_dir, "retreat_schedule_sensitivity.csv")
   write_csv(sensitivity_results, sensitivity_path)
   message("\n✓ Saved sensitivity: ", basename(sensitivity_path))
+  message("  Rows: ", format(nrow(sensitivity_results), big.mark = ","))
+  message("  Includes: retreat timing + buyout economics + government economics")
   
   # Summary
   sensitivity_summary <- sensitivity_results %>%
     group_by(parameter_set, scenario, cliff_scenario, 
-             rental_yield, discount_rate, damage_threshold, 
-             owner_utility) %>%
+             rental_yield, discount_rate, damage_threshold) %>%
     summarise(
       n_properties = n(),
       mean_retreat_year = mean(retreat_year[retreat_year <= bigT], na.rm = TRUE),
@@ -559,6 +842,12 @@ if (RUN_SENSITIVITY) {
       n_mid = sum(timing_category == "mid_term", na.rm = TRUE),
       n_late = sum(timing_category == "late", na.rm = TRUE),
       n_no_retreat = sum(timing_category == "no_retreat", na.rm = TRUE),
+      # Add buyout economics summaries
+      total_buyout_M = sum(buyout_price, na.rm = TRUE) / 1e6,
+      total_market_M = sum(buyout_market_100pct, na.rm = TRUE) / 1e6,
+      gov_net_cost_M = sum(gov_net_cost, na.rm = TRUE) / 1e6,
+      n_capped = sum(buyout_capped, na.rm = TRUE),
+      n_gov_profit = sum(gov_outcome == "profit", na.rm = TRUE),
       .groups = "drop"
     )
   
@@ -567,58 +856,93 @@ if (RUN_SENSITIVITY) {
   message("✓ Saved summary: ", basename(summary_path))
 }
 
-# CALCULATE BUYOUT PRICES
-message("\n→ Calculating buyout prices...")
+# ==============================================================================
+# CALCULATE BUYOUT ECONOMICS FOR BASELINE
+# ==============================================================================
 
-# Function to calculate NPV of rental income
-calculate_npv_rent_buyout <- function(rent, T, discount_rate) {
-  if (T <= 0) return(0)
-  if (T > bigT) return(NA_real_)  # No retreat = no buyout
-  
-  beta <- 1 / (1 + discount_rate)
-  rent * (1 - beta^T) / (1 - beta)
-}
-
-# Add buyout columns to baseline results
-baseline_results <- baseline_results %>%
-  mutate(
-    # NPV of rental income through retreat year
-    npv_rent = mapply(calculate_npv_rent_buyout, rent, retreat_year, 
-                      MoreArgs = list(discount_rate = BASELINE$discount_rate)),
-    
-    # Uncapped buyout = NPV(rent) + land value
-    buyout_uncapped = npv_rent + landval,
-    
-    # Final buyout = capped at market price
-    buyout_price = pmin(buyout_uncapped, PRICE, na.rm = TRUE),
-    
-    # For non-retreating properties, set buyout to NA
-    buyout_price = if_else(retreat_year > bigT, NA_real_, buyout_price),
-    buyout_uncapped = if_else(retreat_year > bigT, NA_real_, buyout_uncapped),
-    npv_rent = if_else(retreat_year > bigT, NA_real_, npv_rent)
-  )
+message("\n→ Calculating buyout economics for BASELINE...")
+baseline_results <- calculate_buyout_economics(baseline_results)
 
 # Buyout summary
 retreating_for_buyout <- baseline_results %>% filter(!is.na(buyout_price))
 total_buyout <- sum(retreating_for_buyout$buyout_price, na.rm = TRUE)
 total_market <- sum(retreating_for_buyout$PRICE, na.rm = TRUE)
-buyout_savings <- total_market - total_buyout
+total_savings <- sum(retreating_for_buyout$buyout_savings_dollars, na.rm = TRUE)
+n_capped <- sum(retreating_for_buyout$buyout_capped, na.rm = TRUE)
 
 message("✓ Buyout prices calculated:")
-message("  Total buyout cost: $", format(round(total_buyout / 1e6, 1), big.mark = ","), "M")
+message("  Total buyout cost (NPV-based, capped): $", format(round(total_buyout / 1e6, 1), big.mark = ","), "M")
 message("  Total market value: $", format(round(total_market / 1e6, 1), big.mark = ","), "M")
-message("  Savings: $", format(round(buyout_savings / 1e6, 1), big.mark = ","), "M (", 
-        round(100 * buyout_savings / total_market, 1), "% discount)")
+message("  Government savings vs market: $", format(round(total_savings / 1e6, 1), big.mark = ","), "M (",
+        round(100 * total_savings / total_market, 1), "% discount)")
+message("  Properties capped at market price: ", n_capped, " (", 
+        round(100 * n_capped / nrow(retreating_for_buyout), 1), "%)")
 
-# Properties capped at market
-capped_count <- sum(retreating_for_buyout$buyout_uncapped > retreating_for_buyout$PRICE, na.rm = TRUE)
-message("  Properties capped at market: ", capped_count, " / ", nrow(retreating_for_buyout), 
-        " (", round(100 * capped_count / nrow(retreating_for_buyout), 1), "%)\n")
+# Government economics
+gov_outcomes <- retreating_for_buyout %>%
+  count(gov_outcome) %>%
+  arrange(desc(n))
+
+total_gov_net_cost <- sum(retreating_for_buyout$gov_net_cost, na.rm = TRUE)
+avg_gov_net_cost <- mean(retreating_for_buyout$gov_net_cost, na.rm = TRUE)
+
+message("\n→ Government Economics (Buyout-Leaseback Program):")
+message("  Government net cost after rent collection: $", 
+        format(round(total_gov_net_cost / 1e6, 1), big.mark = ","), "M")
+message("  Average net cost per property: $", 
+        format(round(avg_gov_net_cost / 1e3), big.mark = ","), "k")
+
+message("\n  Outcome breakdown:")
+for (i in 1:nrow(gov_outcomes)) {
+  outcome_label <- switch(gov_outcomes$gov_outcome[i],
+                          "profit" = "Properties where gov PROFITS",
+                          "break_even" = "Properties where gov breaks even",
+                          "near_break_even" = "Properties near break-even",
+                          "net_cost" = "Properties with net cost to gov"
+  )
+  message("    ", outcome_label, ": ", gov_outcomes$n[i])
+}
+
+message("\n  Pricing model: NPV(future rent) + land value, capped at market price")
+
+# Show average buyout price
+avg_buyout <- mean(retreating_for_buyout$buyout_price, na.rm = TRUE)
+avg_market <- mean(retreating_for_buyout$PRICE, na.rm = TRUE)
+message("  Average buyout: $", format(round(avg_buyout / 1e3), big.mark = ","), "k")
+message("  Average market: $", format(round(avg_market / 1e3), big.mark = ","), "k")
+
+# OPTIONAL: Add sensitivity to test different pricing models
+# Uncomment to test 90% or 110% scenarios
+# baseline_results <- baseline_results %>%
+#   mutate(
+#     buyout_price_90pct = if_else(retreat_year <= bigT, PRICE * 0.90, NA_real_),
+#     buyout_price_110pct = if_else(retreat_year <= bigT, PRICE * 1.10, NA_real_)
+#   )
 
 # SAVE BASELINE RESULTS (with buyout prices)
 baseline_path <- file.path(derived_dir, "retreat_schedule_baseline.csv")
 write_csv(baseline_results, baseline_path)
 message("✓ Saved baseline with buyout prices: ", basename(baseline_path))
+
+# SAVE MONTE CARLO DISTRIBUTIONS (for Shiny visualization)
+if (!is.null(baseline_mc_distributions) && nrow(baseline_mc_distributions) > 0) {
+  mc_dist_path <- file.path(derived_dir, "mc_distributions_baseline.csv")
+  write_csv(baseline_mc_distributions, mc_dist_path)
+  message("✓ Saved Monte Carlo distributions: ", basename(mc_dist_path))
+  message("  Total rows: ", format(nrow(baseline_mc_distributions), big.mark = ","))
+  message("  Properties: ", n_distinct(baseline_mc_distributions$parcel_id))
+  message("  Simulations per property: ", N_MC_SIMS)
+}
+
+# CALCULATE AND SAVE COMMUNITY-LEVEL STATISTICS
+message("\n→ Calculating community-level statistics...")
+community_stats <- calculate_community_stats(baseline_results, planning_horizon = bigT)
+print_community_stats(community_stats)
+
+# Save community stats to JSON for Shiny
+community_stats_path <- file.path(derived_dir, "community_stats_baseline.json")
+jsonlite::write_json(community_stats, community_stats_path, pretty = TRUE, auto_unbox = TRUE)
+message("✓ Saved community statistics: ", basename(community_stats_path))
 
 
 # GENERATE QA REPORT
@@ -642,7 +966,6 @@ cat("BASELINE PARAMETERS:\n")
 cat("  Rental yield:", BASELINE$rental_yield * 100, "%\n")
 cat("  Discount rate:", BASELINE$discount_rate * 100, "%\n")
 cat("  Damage threshold:", BASELINE$damage_threshold, "m\n")
-cat("  Owner utility: $", format(BASELINE$owner_utility, big.mark = ","), "/year\n")
 cat("  Cliff scenario:", BASELINE$cliff_scenario, "\n\n")
 
 cat("BASELINE RESULTS:\n")
@@ -687,4 +1010,3 @@ if (nrow(retreating) > 0) {
 
 cat("\n=================================================\n")
 sink()
-

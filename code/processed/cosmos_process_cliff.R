@@ -18,8 +18,12 @@ project_base  <- "~/Documents/Managed_Shores"            # project root
 crs_work      <- 3310                                    # CA Albers (meters)
 
 # Choose the case and AOI here (only place you edit)
-case_name <- "pacifica"  # pacifica, isla_vista, etc.
-case_abbr <- "paci"      # Short abbreviation for filenames
+case_name <- "pacifica"  # pacifica, isla vista (IV), etc.
+case_abbr <- "pac"      # Short abbreviation for filenames
+
+# Define which region's data to use (determines file format)
+# Options: "CenCal" (uses KMZ), "SoCal" (uses shapefiles)
+data_region <- "SoCal"  # Change to "SoCal" for Southern California sites
 
 # AOI bbox (4326) — set per case
 bbox_lookup <- list(
@@ -44,15 +48,22 @@ clip_vector_to_bbox <- function(v, bbox_poly_4326) {
   suppressWarnings(st_intersection(v, b))
 }
 
-# SOURCE ROOTS FOR CLIFF DATA
-cliff_base <- file.path(external_base, "CoastalCliff_projections_CenCal_CoSMoS_3.1")
+# SOURCE ROOTS FOR CLIFF DATA - vary by region
+if (data_region == "CenCal") {
+  cliff_base <- file.path(external_base, "CoastalCliff_projections_CenCal_CoSMoS_3.1")
+} else if (data_region == "SoCal") {
+  cliff_base <- file.path(external_base, "CoSMoS_cliff_retreat_projections_SoCal")
+} else {
+  stop("data_region must be either 'CenCal' or 'SoCal'")
+}
 
-# CoSMoS 3.1 has two management scenarios
+# CoSMoS has two management scenarios
 letitgo_path <- file.path(cliff_base, "Management_Scenario-LetItGo")
 holdtheline_path <- file.path(cliff_base, "Management_Scenario-HoldTheLine")
 
 
 message("CoSMoS CLIFF DATA PROCESSING: ", toupper(case_name))
+message("Data region: ", data_region)
 message("Extracting BOTH management scenarios")
 
 
@@ -62,10 +73,12 @@ message("Extracting BOTH management scenarios")
 cliff_out <- file.path(local_output, "cliff_retreat")
 dir.create(cliff_out, recursive = TRUE, showWarnings = FALSE)
 
-# Function to process one scenario
-process_cliff_scenario <- function(scenario_path, scenario_name) {
+
+# FUNCTION: Process CenCal KMZ files
+
+process_cliff_scenario_kmz <- function(scenario_path, scenario_name) {
   
-  message("\n→ Processing ", scenario_name, " scenario...")
+  message("\n→ Processing ", scenario_name, " scenario (CenCal KMZ)...")
   message("  Path: ", scenario_path)
   
   if (!dir.exists(scenario_path)) {
@@ -90,7 +103,6 @@ process_cliff_scenario <- function(scenario_path, scenario_name) {
   if (length(kmz_files) == 0) {
     kmz_files <- list.files(kmz_folder, pattern = "cliff_projections.*\\.kmz$", 
                             full.names = TRUE, ignore.case = TRUE)
-    
   }
   
   # Combine main projections and uncertainty files
@@ -163,7 +175,6 @@ process_cliff_scenario <- function(scenario_path, scenario_name) {
           message("      Sample names: ", paste(head(unique_vals, 5), collapse = ", "))
         }
         if ("Description" %in% names(v_clip)) {
-          # KML descriptions often contain the actual data
           message("      Description field available (may contain year/SLR data)")
         }
         
@@ -184,16 +195,121 @@ process_cliff_scenario <- function(scenario_path, scenario_name) {
   invisible(NULL)
 }
 
-# Process Let It Go (natural retreat - PRIMARY for retreat analysis)
-process_cliff_scenario(letitgo_path, "Let It Go")
 
-# Process Hold the Line (with armoring - for cost comparison)
-process_cliff_scenario(holdtheline_path, "Hold the Line")
+# FUNCTION: Process SoCal Shapefiles
+
+process_cliff_scenario_shapefile <- function(scenario_path, scenario_name) {
+  
+  message("\n→ Processing ", scenario_name, " scenario (SoCal Shapefiles)...")
+  message("  Path: ", scenario_path)
+  
+  if (!dir.exists(scenario_path)) {
+    message("  ⚠ Scenario folder not found, skipping")
+    return(invisible(NULL))
+  }
+  
+  # Look for shapefiles directly in the scenario folder
+  # Based on your screenshot: CliffEdgePositions_LetItGo_vFinal.shp
+  # and CliffEdgePositionUncertainty_LetItGo.shp
+  
+  shp_files <- list.files(scenario_path, pattern = "\\.shp$", 
+                          full.names = TRUE, ignore.case = TRUE)
+  
+  if (length(shp_files) == 0) {
+    message("  ⚠ No shapefiles found")
+    return(invisible(NULL))
+  }
+  
+  message("  Found ", length(shp_files), " shapefile(s)")
+  
+  # Categorize files
+  position_files <- grep("CliffEdgePosition.*_vFinal", shp_files, value = TRUE, ignore.case = TRUE)
+  uncertainty_files <- grep("Uncertainty", shp_files, value = TRUE, ignore.case = TRUE)
+  projection_line_files <- grep("Cliff_Projection.*_Line", shp_files, value = TRUE, ignore.case = TRUE)
+  
+  # Process all shapefiles
+  all_shp_files <- shp_files
+  
+  for (shp_file in all_shp_files) {
+    nm <- file_path_sans_ext(basename(shp_file))
+    
+    message("\n    Processing: ", nm)
+    
+    tryCatch({
+      # Read the shapefile
+      v <- suppressMessages(st_read(shp_file, quiet = TRUE))
+      
+      if (is.null(v) || nrow(v) == 0) {
+        message("      ⚠ Shapefile contains no features")
+        next
+      }
+      
+      message("      Total features: ", nrow(v))
+      message("      Geometry: ", as.character(st_geometry_type(v, by_geometry = FALSE)))
+      
+      # Print attributes
+      attr_names <- names(v)
+      message("      Attributes: ", paste(attr_names[1:min(10, length(attr_names))], collapse = ", "))
+      
+      # Clip to study area
+      v_clip <- clip_vector_to_bbox(v, bbox_poly4326_expanded)
+      
+      if (nrow(v_clip) > 0) {
+        # Save as GeoPackage
+        out_path <- file.path(cliff_out, paste0(nm, "_", case_abbr, ".gpkg"))
+        suppressMessages(st_write(v_clip, out_path, delete_dsn = TRUE, quiet = TRUE))
+        
+        message("      ✓ Saved: ", basename(out_path))
+        message("      Features in AOI: ", nrow(v_clip))
+        
+        # Show sample of key fields (SoCal shapefiles may have different field names)
+        sample_fields <- c("YEAR", "Year", "SLR_cm", "SLR", "slr", "SCENARIO", "scenario")
+        for (field in sample_fields) {
+          if (field %in% names(v_clip)) {
+            unique_vals <- unique(v_clip[[field]])
+            message("      ", field, ": ", paste(head(unique_vals, 5), collapse = ", "))
+          }
+        }
+        
+      } else {
+        message("      ⚠ No features in study area")
+        message("      Check bbox: ", paste(names(bbox4326), "=", bbox4326, collapse = ", "))
+      }
+      
+    }, error = function(e) {
+      message("      ⚠ Error processing shapefile: ", e$message)
+    })
+  }
+  
+  invisible(NULL)
+}
+
+
+# MAIN PROCESSING - Choose method based on data_region
+
+
+if (data_region == "CenCal") {
+  # Process Let It Go (natural retreat - PRIMARY for retreat analysis)
+  process_cliff_scenario_kmz(letitgo_path, "Let It Go")
+  
+  # Process Hold the Line (with armoring - for cost comparison)
+  process_cliff_scenario_kmz(holdtheline_path, "Hold the Line")
+  
+} else if (data_region == "SoCal") {
+  # Process Let It Go (natural retreat - PRIMARY for retreat analysis)
+  process_cliff_scenario_shapefile(letitgo_path, "Let It Go")
+  
+  # Process Hold the Line (with armoring - for cost comparison)
+  process_cliff_scenario_shapefile(holdtheline_path, "Hold the Line")
+}
 
 
 # SUMMARY & VALIDATION
 
+message("\n========================================")
 message("CLIFF DATA EXTRACTION COMPLETE")
+message("========================================")
+message("Data region: ", data_region)
 message("Output location: ", local_output)
 message("\nExtracted data:")
 
@@ -201,15 +317,25 @@ message("\nExtracted data:")
 cliff_files_saved <- list.files(cliff_out, pattern = "\\.gpkg$")
 message("  Cliff retreat: ", length(cliff_files_saved), " file(s)")
 
+if (length(cliff_files_saved) > 0) {
+  message("\nExtracted files:")
+  for (f in cliff_files_saved) {
+    message("  - ", f)
+  }
+}
+
 message("\nNEXT STEPS:")
 message("  1. Check extracted files in: ", cliff_out)
 message("  2. Verify cliff data covers your study area")
-message("  3. Run redfin_data_code_ms.R to process property data")
+message("  3. Examine attribute tables to understand data structure")
+message("  4. Run redfin_data_code_ms.R to process property data")
 
 
 # Quick validation: Load and preview one file
 if (length(cliff_files_saved) > 0) {
+  message("\n========================================")
   message("PREVIEW: First cliff retreat file")
+  message("========================================")
   test_file <- file.path(cliff_out, cliff_files_saved[1])
   test_data <- st_read(test_file, quiet = TRUE)
   
@@ -220,10 +346,22 @@ if (length(cliff_files_saved) > 0) {
   message("  Columns: ", paste(names(test_data), collapse = ", "))
   
   # Print first few values of key columns (if they exist)
-  if ("YEAR" %in% names(test_data)) {
-    message("  Years: ", paste(unique(test_data$YEAR)[1:min(5, length(unique(test_data$YEAR)))], collapse = ", "))
+  key_fields <- c("YEAR", "Year", "year", "SLR_cm", "SLR", "slr", 
+                  "SCENARIO", "scenario", "Name", "Description")
+  
+  for (field in key_fields) {
+    if (field %in% names(test_data)) {
+      unique_vals <- unique(test_data[[field]])
+      n_to_show <- min(5, length(unique_vals))
+      message("  ", field, ": ", paste(head(unique_vals, n_to_show), collapse = ", "))
+      if (length(unique_vals) > 5) {
+        message("    (... and ", length(unique_vals) - 5, " more)")
+      }
+    }
   }
-  if ("SLR_cm" %in% names(test_data)) {
-    message("  SLR levels: ", paste(unique(test_data$SLR_cm), collapse = ", "), " cm")
-  }
+  
+  # Show first 3 rows
+  message("\nFirst 3 rows:")
+  print(head(st_drop_geometry(test_data), 3))
 }
+

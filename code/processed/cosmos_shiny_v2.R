@@ -1,109 +1,143 @@
-# cosmos_shiny_v2.R
-# Purpose: Interactive Shiny dashboard for exploring retreat timing under different parameters
+# managed_shores_app_enhanced.R
+# Purpose: Interactive dashboard for coastal managed retreat economics
 # Author: Will Dean (Managed Shores)
 #
-# This app allows users to:
-# - Adjust model parameters (rental yield, discount rate, storm scenario, etc.)
-# - See real-time updates to retreat timing and property-level results
-# - Compare baseline vs custom parameter scenarios
-# - Visualize spatial distribution of retreat timing
+# Enhanced Features:
+# 1. Government economics (profit/loss from buyout-leaseback)
+# 2. Monte Carlo uncertainty visualization
+# 3. SLR scenario comparison
+# 4. Buyout cap analysis
+# 5. Property-level ROI breakdown
 #
-# To run: source("cosmos_interactive_app.R")
+# To run: shiny::runApp("cosmos_shiny_enhanced.R")
 
 rm(list = ls())
 library(shiny)
 library(shinydashboard)
-library(leaflet)
-library(DT)
 library(plotly)
+library(DT)
+library(leaflet)
 library(dplyr)
+library(tidyr)
 library(ggplot2)
-library(scales)
 library(readr)
 library(sf)
+library(scales)
+library(jsonlite)
 
 
-# LOAD DATA
-case_name <- "pacifica"
-data_dir <- file.path("data", case_name)
-derived_dir <- file.path(data_dir, "derived")
+# DATA LOADING
 
-# Load baseline and sensitivity results
+# Configuration
+CASE_NAME <- "king_salmon"  # Change to isla_vista, pacifica as needed
+DATA_DIR <- file.path("data", CASE_NAME)
+DERIVED_DIR <- file.path(DATA_DIR, "derived")
+
+# Load baseline results
 baseline_results <- read_csv(
-  file.path(derived_dir, "retreat_schedule_baseline.csv"),
+  file.path(DERIVED_DIR, "retreat_schedule_baseline.csv"),
   show_col_types = FALSE
 )
 
-sensitivity_results <- read_csv(
-  file.path(derived_dir, "retreat_schedule_sensitivity.csv"),
-  show_col_types = FALSE
-)
-
-# Combine for easy filtering
-all_results <- bind_rows(
-  baseline_results,
-  sensitivity_results
-)
-
-# Add elevation if missing (for backwards compatibility)
-if (!"elevation" %in% names(all_results)) {
-  all_results$elevation <- NA_real_
-  message("Note: 'elevation' column not found in data - using NA")
-}
-
-# Create spatial version for mapping
-results_sf <- all_results %>%
-  filter(!is.na(LATITUDE), !is.na(LONGITUDE)) %>%
-  st_as_sf(coords = c("LONGITUDE", "LATITUDE"), crs = 4326, remove = FALSE)
-
-# Parameter ranges
-rental_yields <- c(0.04, 0.05, 0.06)
-discount_rates <- c(0.015, 0.02, 0.03)
-damage_thresholds <- c(0.0, 0.15, 0.30)
-owner_utilities <- c(0, 25000, 50000)
-slr_scenarios <- c("Intermediate", "Intermediate_High", "High")
-
-# Check if cliff scenarios exist in data
-cliff_scenarios <- unique(all_results$cliff_scenario)
-has_cliff_scenarios <- !all(is.na(cliff_scenarios))
-if (has_cliff_scenarios) {
-  cliff_scenarios <- cliff_scenarios[!is.na(cliff_scenarios)]
+# Load sensitivity results (if available)
+sensitivity_file <- file.path(DERIVED_DIR, "retreat_schedule_sensitivity.csv")
+if (file.exists(sensitivity_file)) {
+  sensitivity_results <- read_csv(sensitivity_file, show_col_types = FALSE)
+  
+  # Add result_type indicator
+  baseline_results <- baseline_results %>% mutate(result_type = "baseline")
+  sensitivity_results <- sensitivity_results %>% mutate(result_type = "sensitivity")
+  
+  all_results <- bind_rows(baseline_results, sensitivity_results)
+  has_sensitivity <- TRUE
 } else {
-  cliff_scenarios <- c("Not Applicable")
+  all_results <- baseline_results %>% mutate(result_type = "baseline")
+  has_sensitivity <- FALSE
 }
 
+# Load Monte Carlo distributions (if available)
+mc_file <- file.path(DERIVED_DIR, "mc_distributions_baseline.csv")
+if (file.exists(mc_file)) {
+  mc_distributions <- read_csv(mc_file, show_col_types = FALSE)
+  has_mc <- TRUE
+} else {
+  has_mc <- FALSE
+}
 
+# Load community stats (if available)
+stats_file <- file.path(DERIVED_DIR, "community_stats_baseline.json")
+if (file.exists(stats_file)) {
+  community_stats <- fromJSON(stats_file)
+  has_stats <- TRUE
+} else {
+  has_stats <- FALSE
+}
+
+# Detect site type
+has_flood <- any(grepl("flood", all_results$retreat_trigger, ignore.case = TRUE))
+has_cliff <- any(grepl("cliff", all_results$retreat_trigger, ignore.case = TRUE))
+
+site_type <- case_when(
+  has_flood & !has_cliff ~ "FLOOD",
+  has_cliff & !has_flood ~ "CLIFF",
+  has_flood & has_cliff ~ "HYBRID",
+  TRUE ~ "UNKNOWN"
+)
+
+# Extract parameter ranges - order correctly
+scenarios_raw <- unique(all_results$scenario) %>% na.omit()
+# Correct order: Intermediate, Intermediate_High, High
+scenario_order <- c("Intermediate", "Intermediate_High", "High")
+scenarios <- scenario_order[scenario_order %in% scenarios_raw]
+
+# Check for government economics columns
+has_gov_econ <- all(c("gov_net_cost", "gov_outcome", "gov_rent_collected", "gov_land_recovered") %in% names(baseline_results))
+has_buyout_cap <- "buyout_capped" %in% names(baseline_results)
+
+# =============================================================================
 # UI
+# =============================================================================
+
 ui <- dashboardPage(
   skin = "blue",
   
   dashboardHeader(
-    title = "Managed Shores: Retreat Parameter Explorer",
+    title = paste0("Managed Shores: ", toupper(CASE_NAME)),
     titleWidth = 400
   ),
   
   dashboardSidebar(
-    width = 300,
+    width = 280,
+    
     sidebarMenu(
-      menuItem("Parameter Explorer", tabName = "explorer", icon = icon("sliders")),
-      menuItem("Spatial Comparison", tabName = "map", icon = icon("map")),
-      menuItem("Summary Statistics", tabName = "stats", icon = icon("chart-bar")),
-      menuItem("About", tabName = "about", icon = icon("info-circle"))
+      id = "tabs",
+      menuItem("🏛️ Government Economics", tabName = "gov_econ", icon = icon("landmark")),
+      menuItem("💰 Property Buyouts", tabName = "buyouts", icon = icon("dollar-sign")),
+      menuItem("🌊 SLR Scenarios", tabName = "scenarios", icon = icon("water")),
+      menuItem("📊 Monte Carlo", tabName = "mc", icon = icon("dice")),
+      menuItem("🗺️ Spatial View", tabName = "map", icon = icon("map")),
+      menuItem("ℹ️ About", tabName = "about", icon = icon("info-circle"))
     ),
+    
     hr(),
-    h4("Model Parameters", style = "padding-left: 15px; font-weight: bold;"),
+    
+    # SCENARIO SELECTION
+    h4("Scenario", style = "padding-left: 15px; font-weight: bold;"),
     
     selectInput(
       "slr_scenario",
       "SLR Scenario:",
-      choices = slr_scenarios,
-      selected = "High"
+      choices = scenarios,
+      selected = scenarios[1]  # Default to Intermediate
     ),
+    
+    hr(),
+    h4("Parameters", style = "padding-left: 15px; font-weight: bold;"),
     
     sliderInput(
       "rental_yield",
       "Rental Yield (%):",
-      min = 4,
+      min = 3,
       max = 6,
       value = 5,
       step = 1,
@@ -120,33 +154,15 @@ ui <- dashboardPage(
       post = "%"
     ),
     
-    sliderInput(
-      "damage_threshold",
-      "Damage Threshold (cm):",
-      min = 0,
-      max = 30,
-      value = 15,
-      step = 15
-    ),
-    
-    sliderInput(
-      "owner_utility",
-      "Owner Utility ($/year):",
-      min = 0,
-      max = 50000,
-      value = 0,
-      step = 25000,
-      pre = "$"
-    ),
-    
-    # Only show cliff scenario selector if cliff scenarios exist
     conditionalPanel(
-      condition = "output.has_cliff_scenarios",
-      selectInput(
-        "cliff_scenario",
-        "Cliff Management:",
-        choices = NULL,  # Will be updated in server
-        selected = NULL
+      condition = paste0("'", site_type, "' != 'CLIFF'"),
+      sliderInput(
+        "damage_threshold",
+        "Damage Threshold (cm):",
+        min = 15,
+        max = 30,
+        value = 15,
+        step = 15
       )
     ),
     
@@ -158,841 +174,1239 @@ ui <- dashboardPage(
   dashboardBody(
     tags$head(
       tags$style(HTML("
-        .value-box { height: 100px; }
+        .value-box { height: 110px; }
+        .info-box { min-height: 90px; }
         .small-box .icon-large { font-size: 60px; }
+        .bg-profit { background-color: #00a65a !important; }
+        .bg-loss { background-color: #dd4b39 !important; }
+        .bg-neutral { background-color: #f39c12 !important; }
       "))
     ),
     
     tabItems(
-      # TAB 1: Parameter Explorer
+      
+
+      # TAB 1: GOVERNMENT ECONOMICS
       tabItem(
-        tabName = "explorer",
-        fluidRow(
-          valueBoxOutput("median_retreat_box", width = 3),
-          valueBoxOutput("immediate_retreat_box", width = 3),
-          valueBoxOutput("total_properties_box", width = 3),
-          valueBoxOutput("buyout_cost_box", width = 3)
-        ),
+        tabName = "gov_econ",
         
+        h2("Government Economics: Buyout-Leaseback Program"),
+        p("Analyze the net cost/profit of the managed retreat program from the government's perspective."),
+        
+        # Show current parameters
         fluidRow(
           box(
-            title = "Retreat Timeline Distribution",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 6,
-            plotlyOutput("timing_dist_plot", height = "350px")
-          ),
-          box(
-            title = "Comparison with Baseline",
+            title = NULL,
             status = "info",
-            solidHeader = TRUE,
-            width = 6,
-            plotlyOutput("baseline_comparison_plot", height = "350px")
+            width = 12,
+            solidHeader = FALSE,
+            background = "light-blue",
+            htmlOutput("current_params_display")
           )
         ),
         
+        # Top-level metrics
+        fluidRow(
+          valueBoxOutput("total_buyout_box", width = 3),
+          valueBoxOutput("total_revenue_box", width = 3),
+          valueBoxOutput("gov_net_box", width = 3),
+          valueBoxOutput("roi_pct_box", width = 3)
+        ),
+        
+        fluidRow(
+          valueBoxOutput("rent_collected_box", width = 4),
+          valueBoxOutput("land_recovered_box", width = 4),
+          valueBoxOutput("props_capped_box", width = 4)
+        ),
+        
+        # Government economics breakdown
         fluidRow(
           box(
-            title = "Property-Level Results",
+            title = "Government Cash Flow (Buyout-Leaseback Model)",
             status = "primary",
             solidHeader = TRUE,
+            width = 8,
+            plotlyOutput("gov_cashflow", height = "400px"),
+            hr(),
+            htmlOutput("cashflow_explanation")
+          ),
+          
+          box(
+            title = "Property Outcome Breakdown",
+            status = "success",
+            solidHeader = TRUE,
+            width = 4,
+            plotlyOutput("outcome_pie", height = "250px"),
+            hr(),
+            htmlOutput("outcome_stats")
+          )
+        ),
+        
+        # By retreat timing
+        fluidRow(
+          box(
+            title = "Government Net Cost by Retreat Timing",
+            status = "warning",
+            solidHeader = TRUE,
             width = 12,
-            DT::dataTableOutput("property_table")
+            plotlyOutput("net_by_timing", height = "350px"),
+            htmlOutput("timing_explanation")
           )
         )
       ),
       
-      # TAB 2: Spatial Map
+
+      # TAB 2: PROPERTY BUYOUTS
+      tabItem(
+        tabName = "buyouts",
+        
+        h2("Property-Level Buyout Analysis"),
+        p("Detailed breakdown of buyout pricing and economics for each property."),
+        
+        # Summary metrics
+        fluidRow(
+          infoBoxOutput("total_props_box", width = 3),
+          infoBoxOutput("avg_buyout_box", width = 3),
+          infoBoxOutput("avg_market_box", width = 3),
+          infoBoxOutput("total_savings_box", width = 3)
+        ),
+        
+        # Buyout vs market comparison
+        fluidRow(
+          box(
+            title = "Buyout Price vs Market Value",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 6,
+            plotlyOutput("buyout_scatter", height = "400px")
+          ),
+          
+          box(
+            title = "Buyout Price Distribution",
+            status = "info",
+            solidHeader = TRUE,
+            width = 6,
+            plotlyOutput("buyout_hist", height = "400px")
+          )
+        ),
+        
+        # Property table
+        fluidRow(
+          box(
+            title = "Property-Level Details",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 12,
+            p("Properties highlighted in green generate government profit. Red indicates net cost."),
+            DT::dataTableOutput("buyout_table")
+          )
+        )
+      ),
+      
+
+      # TAB 3: SLR SCENARIO COMPARISON
+      tabItem(
+        tabName = "scenarios",
+        
+        h2("Sea Level Rise Scenario Comparison"),
+        p("Compare retreat timing and costs across different SLR projections."),
+        
+        # Scenario comparison
+        fluidRow(
+          box(
+            title = "Retreat Timing by SLR Scenario",
+            status = "primary",
+            solidHeader = TRUE,
+            width = 6,
+            plotlyOutput("scenario_retreat_years", height = "400px")
+          ),
+          
+          box(
+            title = "Government Economics by Scenario",
+            status = "success",
+            solidHeader = TRUE,
+            width = 6,
+            plotlyOutput("scenario_gov_econ", height = "400px")
+          )
+        ),
+        
+        fluidRow(
+          box(
+            title = "Properties Retreating Over Time",
+            status = "warning",
+            solidHeader = TRUE,
+            width = 12,
+            plotlyOutput("cumulative_retreat", height = "400px"),
+            htmlOutput("scenario_interpretation")
+          )
+        )
+      ),
+      
+
+      # TAB 4: MONTE CARLO UNCERTAINTY
+      tabItem(
+        tabName = "mc",
+        
+        h2("Monte Carlo Uncertainty Analysis"),
+        p("Visualize uncertainty in retreat timing from storm variability."),
+        
+        conditionalPanel(
+          condition = paste0("'", has_mc, "' == 'TRUE'"),
+          
+          # MC summary metrics
+          fluidRow(
+            infoBoxOutput("mc_sims_box", width = 3),
+            infoBoxOutput("mc_uncertainty_box", width = 3),
+            infoBoxOutput("mc_range_box", width = 3),
+            infoBoxOutput("mc_confidence_box", width = 3)
+          ),
+          
+          # Property selector for MC visualization
+          fluidRow(
+            box(
+              title = "Select Property for Detailed MC Analysis",
+              status = "info",
+              solidHeader = TRUE,
+              width = 12,
+              selectInput(
+                "mc_property",
+                "Property:",
+                choices = NULL  # Will be populated dynamically
+              )
+            )
+          ),
+          
+          # MC distribution plots
+          fluidRow(
+            box(
+              title = "Monte Carlo Distribution (Selected Property)",
+              status = "primary",
+              solidHeader = TRUE,
+              width = 6,
+              plotlyOutput("mc_histogram", height = "400px"),
+              htmlOutput("mc_property_stats")
+            ),
+            
+            box(
+              title = "Community-Wide MC Uncertainty",
+              status = "warning",
+              solidHeader = TRUE,
+              width = 6,
+              plotlyOutput("mc_uncertainty_scatter", height = "400px"),
+              htmlOutput("mc_community_stats")
+            )
+          )
+        ),
+        
+        conditionalPanel(
+          condition = paste0("'", has_mc, "' == 'FALSE'"),
+          box(
+            title = "Monte Carlo Data Not Available",
+            status = "danger",
+            solidHeader = TRUE,
+            width = 12,
+            p("Monte Carlo distributions were not found. Make sure 'mc_distributions_baseline.csv' exists in the derived data directory."),
+            p("Run the valuation script with Monte Carlo enabled to generate this data.")
+          )
+        )
+      ),
+      
+
+      # TAB 5: SPATIAL MAP
       tabItem(
         tabName = "map",
+        
+        h2("Spatial Distribution of Retreat Timing"),
+        p("Interactive map showing when properties should retreat based on economic analysis."),
+        
         fluidRow(
           box(
-            title = "Spatial Distribution of Retreat Timing",
+            title = "Retreat Timing Map",
             status = "primary",
             solidHeader = TRUE,
-            width = 12,
+            width = 9,
             leafletOutput("retreat_map", height = "600px")
-          )
-        ),
-        fluidRow(
-          box(
-            title = "Selected Parameters",
-            status = "info",
-            width = 6,
-            verbatimTextOutput("param_summary")
           ),
+          
           box(
-            title = "Map Legend",
+            title = "Selected Property",
             status = "info",
-            width = 6,
-            HTML("
-              <p><strong>Retreat Timing Categories:</strong></p>
-              <ul>
-                <li><span style='color: #d73027;'>●</span> Immediate (0-10 years)</li>
-                <li><span style='color: #fc8d59;'>●</span> Early (11-25 years)</li>
-                <li><span style='color: #fee08b;'>●</span> Mid-term (26-50 years)</li>
-                <li><span style='color: #91bfdb;'>●</span> Late (51-100 years)</li>
-                <li><span style='color: #4575b4;'>●</span> No Retreat (>100 years)</li>
-              </ul>
-            ")
+            solidHeader = TRUE,
+            width = 3,
+            uiOutput("selected_property_info"),
+            hr(),
+            uiOutput("selected_property_econ")
           )
         )
       ),
       
-      # TAB 3: Summary Statistics
-      tabItem(
-        tabName = "stats",
-        fluidRow(
-          box(
-            title = "Summary by Timing Category",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            DT::dataTableOutput("summary_table")
-          )
-        ),
-        fluidRow(
-          box(
-            title = "Histogram: Retreat Year Distribution",
-            status = "info",
-            solidHeader = TRUE,
-            width = 6,
-            plotlyOutput("retreat_histogram", height = "350px")
-          ),
-          box(
-            title = "Economic Impact by Category",
-            status = "info",
-            solidHeader = TRUE,
-            width = 6,
-            plotlyOutput("economic_impact_plot", height = "350px")
-          )
-        ),
-        fluidRow(
-          box(
-            title = "Buyout Cost Analysis",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            plotlyOutput("buyout_comparison_plot", height = "350px")
-          )
-        )
-      ),
-      
-      # TAB 4: About
+      # TAB 6: ABOUT
       tabItem(
         tabName = "about",
-        fluidRow(
-          box(
-            title = "About This Tool",
-            status = "primary",
-            solidHeader = TRUE,
-            width = 12,
-            h3("Managed Shores Retreat Parameter Explorer"),
-            p("This interactive tool allows you to explore how different model parameters affect 
-              optimal retreat timing for coastal properties in Carpinteria, California."),
-            
-            h4("Model Overview"),
-            p("The retreat timing model calculates the optimal year T* for each property by comparing:"),
-            tags$ul(
-              tags$li("NPV of rental income from staying"),
-              tags$li("NPV of expected flood damages"),
-              tags$li("Owner utility (non-financial value of coastal living)")
-            ),
-            p("Properties should retreat when NPV(staying) ≤ 0."),
-            
-            h4("Parameters"),
-            tags$ul(
-              tags$li(strong("SLR Scenario:"), " OPC 2024 projections (Intermediate, Intermediate-High, High)"),
-              tags$li(strong("Rental Yield:"), " Annual rent as % of property value (4-6%)"),
-              tags$li(strong("Discount Rate:"), " Rate for calculating present value (1.5-3%)"),
-              tags$li(strong("Damage Threshold:"), " Minimum flood depth to count as damage (0-30cm)"),
-              tags$li(strong("Owner Utility:"), " Annual non-financial value of living there ($0-50K)")
-            ),
-            
-            conditionalPanel(
-              condition = "output.has_cliff_scenarios",
-              tags$ul(
-                tags$li(strong("Cliff Management:"), " Let It Go (natural erosion) vs Hold The Line (armoring)")
-              )
-            ),
-            
-            tags$div(
-              class = "alert alert-info",
-              style = "background-color: #d9edf7; border-color: #bce8f1; padding: 15px; margin: 15px 0; border-radius: 4px;",
-              h4(icon("info-circle"), " Parameter Exploration", style = "margin-top: 0;"),
-              p(strong("This tool supports complete parameter exploration:"), 
-                " You can adjust ANY combination of parameters and see the results immediately."),
-              p(strong("How it works:"), " The model has been run for multiple parameter combinations ",
-                "(3 rental yields × 3 discount rates × 3 thresholds × 3 utilities × 3 SLR scenarios), ",
-                "allowing you to explore the parameter space interactively."),
-              p(strong("Example combinations to try:"), br(),
-                "• Conservative: 4% yield + 3% discount (lower retreat likelihood)", br(),
-                "• Aggressive: 6% yield + 1.5% discount (higher retreat likelihood)", br(),
-                "• With utility: Any combo + $50K utility (delays retreat)")
-            ),
-            
-            h4("Data Sources"),
-            tags$ul(
-              tags$li("CoSMoS flood projections (USGS)"),
-              tags$li("OPC 2024 sea level rise scenarios"),
-              tags$li("Redfin property data"),
-              tags$li("California land values by ZIP code")
-            ),
-            
-            h4("Citation"),
-            p("Dean, W. (2025). Managed Shores: Economic Analysis of Coastal Retreat Timing. 
-              [Working Paper]")
-          )
+        
+        h2("About This Dashboard"),
+        
+        box(
+          title = "Managed Shores: Buyout-Leaseback Economic Model",
+          status = "info",
+          solidHeader = TRUE,
+          width = 12,
+          
+          h4("Overview"),
+          p("This dashboard analyzes the economics of proactive managed retreat through a buyout-leaseback program.",
+            "The government purchases coastal properties before they become uninhabitable, leases them back to",
+            "former owners, and eventually recovers the land when flooding makes continued occupation unviable."),
+          
+          h4("Model Parameters"),
+          tags$ul(
+            tags$li(strong("Rental Yield:"), "Annual rent as % of property value (3-6%)"),
+            tags$li(strong("Discount Rate:"), "Social discount rate for NPV calculations (1.5-3%)"),
+            tags$li(strong("Damage Threshold:"), "Minimum flood depth triggering economic damages (15-30cm)")
+          ),
+          
+          h4("Government Economics"),
+          p("The model tracks government cash flows:"),
+          tags$ul(
+            tags$li(strong("Buyout Cost:"), "MIN(NPV(future rent) + land value, market price)"),
+            tags$li(strong("Revenue:"), "Rent collected + land value recovered at retreat"),
+            tags$li(strong("Net Cost:"), "Buyout - Rent - Land (negative = profit!)")
+          ),
+          
+          h4("Data Sources"),
+          tags$ul(
+            tags$li("Sea level rise: CoSMoS (USGS)"),
+            tags$li("Property values: Redfin"),
+            tags$li("Storm scenarios: Monte Carlo simulation")
+          ),
+          
+          h4("Site Information"),
+          p(paste0("Site Type: ", site_type)),
+          p(paste0("Total Properties: ", nrow(baseline_results))),
+          p(paste0("SLR Scenarios: ", paste(scenarios, collapse = ", "))),
+          p(paste0("Monte Carlo: ", ifelse(has_mc, "Enabled", "Not available"))),
+          p(paste0("Government Economics: ", ifelse(has_gov_econ, "Available", "Not available")))
         )
       )
     )
   )
 )
 
+# =============================================================================
 # SERVER
+# =============================================================================
 
 server <- function(input, output, session) {
   
-  # Initialize cliff scenario selector
-  if (has_cliff_scenarios) {
-    updateSelectInput(session, "cliff_scenario", 
-                      choices = cliff_scenarios,
-                      selected = cliff_scenarios[1])
-  }
+  # REACTIVE DATA FILTERS
   
-  # Output to control conditional panel
-  output$has_cliff_scenarios <- reactive({ has_cliff_scenarios })
-  outputOptions(output, "has_cliff_scenarios", suspendWhenHidden = FALSE)
-  
-  # Reactive: Get filtered data based on current parameters
-  current_data <- reactive({
-    data <- all_results %>%
-      filter(
-        scenario == input$slr_scenario,
-        rental_yield == input$rental_yield / 100,
-        discount_rate == input$discount_rate / 100,
-        damage_threshold == input$damage_threshold / 100,
-        owner_utility == input$owner_utility
-      )
-    
-    # Filter by cliff scenario if applicable
-    if (has_cliff_scenarios && !is.null(input$cliff_scenario)) {
-      data <- data %>% filter(cliff_scenario == input$cliff_scenario)
-    }
-    
-    data
-  })
-  
-  # Reactive: Track current parameter combination for display
-  current_param_label <- reactive({
-    if (has_cliff_scenarios && !is.null(input$cliff_scenario)) {
-      sprintf(
-        "%.0f%% yield, %.1f%% discount, %.0fcm threshold, $%s utility, %s",
-        input$rental_yield,
-        input$discount_rate,
-        input$damage_threshold,
-        format(input$owner_utility, big.mark = ","),
-        input$cliff_scenario
-      )
-    } else {
-      sprintf(
-        "%.0f%% yield, %.1f%% discount, %.0fcm threshold, $%s utility",
-        input$rental_yield,
-        input$discount_rate,
-        input$damage_threshold,
-        format(input$owner_utility, big.mark = ",")
-      )
-    }
-  })
-  
-  # Reactive: Baseline data for comparison
   baseline_data <- reactive({
-    data <- baseline_results %>%
+    all_results %>%
+      filter(
+        result_type == "baseline",
+        scenario == input$slr_scenario
+      )
+  })
+  
+  filtered_data <- reactive({
+    # Start with all data for this scenario
+    df <- all_results %>%
       filter(scenario == input$slr_scenario)
     
-    # Filter by cliff scenario if applicable
-    if (has_cliff_scenarios && !is.null(input$cliff_scenario)) {
-      data <- data %>% filter(cliff_scenario == input$cliff_scenario)
+    n_before <- nrow(df)
+    
+    # Apply parameter filters based on sliders
+    # Note: Data has parameters as decimals (e.g., 0.05 = 5%), slider shows percentages
+    if ("rental_yield" %in% names(df)) {
+      target_yield <- input$rental_yield / 100  # Convert 5% -> 0.05
+      df <- df %>% filter(abs(rental_yield - target_yield) < 0.001)
     }
     
-    data
-  })
-  
-  # Reset button
-  observeEvent(input$reset, {
-    updateSliderInput(session, "rental_yield", value = 5)
-    updateSliderInput(session, "discount_rate", value = 2.0)
-    updateSliderInput(session, "damage_threshold", value = 15)
-    updateSliderInput(session, "owner_utility", value = 0)
-    
-    # Reset cliff scenario to first option if applicable
-    if (has_cliff_scenarios) {
-      updateSelectInput(session, "cliff_scenario", selected = cliff_scenarios[1])
+    if ("discount_rate" %in% names(df)) {
+      target_rate <- input$discount_rate / 100  # Convert 2% -> 0.02
+      df <- df %>% filter(abs(discount_rate - target_rate) < 0.001)
     }
+    
+    if ("damage_threshold" %in% names(df) && site_type != "CLIFF") {
+      target_threshold <- input$damage_threshold / 100  # Convert 15cm -> 0.15m
+      df <- df %>% filter(abs(damage_threshold - target_threshold) < 0.001)
+    }
+    
+    n_after <- nrow(df)
+    
+    # Debug: print what we filtered to
+    if (n_after > 0 && n_after != n_before) {
+      message(sprintf("Filtered from %d to %d rows for scenario=%s, yield=%.0f%%, discount=%.1f%%, threshold=%.0fcm",
+                      n_before, n_after, input$slr_scenario, 
+                      input$rental_yield, input$discount_rate, input$damage_threshold))
+    }
+    
+    # If no matches found, use baseline
+    if (nrow(df) == 0) {
+      message("No sensitivity data found for these parameters, using baseline")
+      df <- all_results %>%
+        filter(scenario == input$slr_scenario, result_type == "baseline")
+    }
+    
+    df
   })
   
-  # Value Boxes
-  output$median_retreat_box <- renderValueBox({
-    med_year <- median(current_data()$retreat_year[current_data()$retreat_year <= 100], 
-                       na.rm = TRUE)
+  # Update MC property selector
+  observe({
+    df <- baseline_data()
+    props_with_retreat <- df %>% 
+      filter(!is.na(buyout_price)) %>%
+      arrange(retreat_year) %>%
+      mutate(label = paste0(ADDRESS, " (T*=", round(retreat_year, 1), ")"))
+    
+    updateSelectInput(session, "mc_property", 
+                      choices = setNames(props_with_retreat$parcel_id, props_with_retreat$label),
+                      selected = props_with_retreat$parcel_id[1])
+  })
+  
+  # TAB 1: GOVERNMENT ECONOMICS OUTPUTS
+
+  output$current_params_display <- renderUI({
+    df <- filtered_data()
+    n_props <- sum(!is.na(df$buyout_price))
+    
+    HTML(paste0(
+      "<strong>Current Parameters:</strong> ",
+      "SLR: ", input$slr_scenario, " | ",
+      "Rental Yield: ", input$rental_yield, "% | ",
+      "Discount: ", input$discount_rate, "% | ",
+      "Threshold: ", input$damage_threshold, "cm | ",
+      "<span style='color: #2ecc71;'><strong>", n_props, " properties analyzed</strong></span>"
+    ))
+  })
+  
+  output$total_buyout_box <- renderValueBox({
+    df <- filtered_data() %>% filter(!is.na(buyout_price))
+    total <- sum(df$buyout_price, na.rm = TRUE)
+    
     valueBox(
-      value = ifelse(is.na(med_year), "N/A", round(med_year)),
-      subtitle = "Median Retreat Year",
-      icon = icon("calendar"),
+      paste0("$", round(total / 1e6, 1), "M"),
+      "Total Buyout Cost",
+      icon = icon("hand-holding-usd"),
+      color = "orange"
+    )
+  })
+  
+  output$total_revenue_box <- renderValueBox({
+    if (!has_gov_econ) {
+      valueBox("N/A", "Revenue data not available", icon = icon("question"), color = "red")
+    } else {
+      df <- filtered_data() %>% filter(!is.na(buyout_price))
+      rent <- sum(df$gov_rent_collected, na.rm = TRUE)
+      land <- sum(df$gov_land_recovered, na.rm = TRUE)
+      total <- rent + land
+      
+      valueBox(
+        paste0("$", round(total / 1e6, 1), "M"),
+        "Total Revenue (Rent + Land)",
+        icon = icon("coins"),
+        color = "green"
+      )
+    }
+  })
+  
+  output$gov_net_box <- renderValueBox({
+    if (!has_gov_econ) {
+      valueBox("N/A", "Gov economics not available", icon = icon("question"), color = "red")
+    } else {
+      df <- filtered_data() %>% filter(!is.na(buyout_price))
+      net <- sum(df$gov_net_cost, na.rm = TRUE)
+      
+      if (net < 0) {
+        valueBox(
+          paste0("$", round(abs(net) / 1e6, 1), "M"),
+          "Government PROFIT",
+          icon = icon("chart-line"),
+          color = "green"
+        )
+      } else if (net > 0) {
+        valueBox(
+          paste0("$", round(net / 1e6, 1), "M"),
+          "Government Cost",
+          icon = icon("exclamation-triangle"),
+          color = "red"
+        )
+      } else {
+        valueBox(
+          "$0",
+          "Break Even",
+          icon = icon("balance-scale"),
+          color = "yellow"
+        )
+      }
+    }
+  })
+  
+  output$roi_pct_box <- renderValueBox({
+    if (!has_gov_econ) {
+      valueBox("N/A", "ROI not available", icon = icon("question"), color = "red")
+    } else {
+      df <- filtered_data() %>% filter(!is.na(buyout_price))
+      buyout <- sum(df$buyout_price, na.rm = TRUE)
+      net <- sum(df$gov_net_cost, na.rm = TRUE)
+      
+      # ROI = (Revenue - Cost) / Cost = -Net / Buyout
+      roi_pct <- -100 * net / buyout
+      
+      color <- if(roi_pct > 20) "green" else if(roi_pct > 0) "yellow" else "red"
+      
+      valueBox(
+        paste0(round(roi_pct, 1), "%"),
+        "Return on Investment",
+        icon = icon("percentage"),
+        color = color
+      )
+    }
+  })
+  
+  output$rent_collected_box <- renderValueBox({
+    if (!has_gov_econ) {
+      valueBox("N/A", "Data not available", icon = icon("question"), color = "red")
+    } else {
+      df <- filtered_data() %>% filter(!is.na(buyout_price))
+      rent <- sum(df$gov_rent_collected, na.rm = TRUE)
+      
+      valueBox(
+        paste0("$", round(rent / 1e6, 1), "M"),
+        "Rent Collected",
+        icon = icon("money-bill-wave"),
+        color = "blue"
+      )
+    }
+  })
+  
+  output$land_recovered_box <- renderValueBox({
+    if (!has_gov_econ) {
+      valueBox("N/A", "Data not available", icon = icon("question"), color = "red")
+    } else {
+      df <- filtered_data() %>% filter(!is.na(buyout_price))
+      land <- sum(df$gov_land_recovered, na.rm = TRUE)
+      
+      valueBox(
+        paste0("$", round(land / 1e6, 1), "M"),
+        "Land Recovered",
+        icon = icon("landmark"),
+        color = "purple"
+      )
+    }
+  })
+  
+  output$props_capped_box <- renderValueBox({
+    if (!has_buyout_cap) {
+      valueBox("N/A", "Cap data not available", icon = icon("question"), color = "red")
+    } else {
+      df <- filtered_data() %>% filter(!is.na(buyout_price))
+      n_capped <- sum(df$buyout_capped, na.rm = TRUE)
+      pct <- 100 * n_capped / nrow(df)
+      
+      valueBox(
+        paste0(n_capped, " (", round(pct, 1), "%)"),
+        "Properties Capped at Market",
+        icon = icon("hand-paper"),
+        color = "yellow"
+      )
+    }
+  })
+  
+  output$gov_cashflow <- renderPlotly({
+    if (!has_gov_econ) {
+      plot_ly() %>% layout(title = "Government economics data not available")
+    } else {
+      df <- filtered_data() %>% filter(!is.na(buyout_price))
+      
+      buyout_total <- sum(df$buyout_price, na.rm = TRUE) / 1e6
+      rent_total <- sum(df$gov_rent_collected, na.rm = TRUE) / 1e6
+      land_total <- sum(df$gov_land_recovered, na.rm = TRUE) / 1e6
+      net_total <- sum(df$gov_net_cost, na.rm = TRUE) / 1e6
+      
+      data <- data.frame(
+        category = c("Buyout Paid", "Rent Collected", "Land Recovered", "Net Cost/Profit"),
+        value = c(-buyout_total, rent_total, land_total, -net_total),
+        type = c("cost", "revenue", "revenue", if(net_total < 0) "profit" else "cost")
+      )
+      
+      colors <- c("cost" = "#e74c3c", "revenue" = "#3498db", "profit" = "#2ecc71")
+      
+      plot_ly(data, x = ~category, y = ~value, type = "bar",
+              marker = list(color = ~colors[type])) %>%
+        layout(
+          title = "Government Cash Flow (Millions $)",
+          xaxis = list(title = ""),
+          yaxis = list(title = "Amount ($M)"),
+          hovermode = "x"
+        )
+    }
+  })
+  
+  output$cashflow_explanation <- renderUI({
+    if (!has_gov_econ) {
+      HTML("<p>Government economics data not available.</p>")
+    } else {
+      df <- baseline_data() %>% filter(!is.na(buyout_price))
+      net <- sum(df$gov_net_cost, na.rm = TRUE)
+      
+      if (net < 0) {
+        HTML(paste0(
+          "<p><strong>Government PROFITS $", round(abs(net)/1e6, 1), "M from this program!</strong></p>",
+          "<p>The buyout-leaseback model generates positive returns by:</p>",
+          "<ul>",
+          "<li>Collecting rental income during the leaseback period</li>",
+          "<li>Recovering land value when properties retreat</li>",
+          "<li>Capping buyouts at market price (prevents overpayment)</li>",
+          "</ul>"
+        ))
+      } else {
+        HTML(paste0(
+          "<p><strong>Government has net cost of $", round(net/1e6, 1), "M</strong></p>",
+          "<p>This could indicate:</p>",
+          "<ul>",
+          "<li>Rental yield too low for cost recovery</li>",
+          "<li>Properties retreating too early (less rent collected)</li>",
+          "<li>Land values too low</li>",
+          "</ul>"
+        ))
+      }
+    }
+  })
+  
+  output$outcome_pie <- renderPlotly({
+    if (!has_gov_econ) {
+      plot_ly() %>% layout(title = "Data not available")
+    } else {
+      df <- filtered_data() %>% filter(!is.na(buyout_price))
+      
+      outcome_counts <- df %>%
+        count(gov_outcome) %>%
+        mutate(label = paste0(gov_outcome, ": ", n))
+      
+      colors <- c(
+        "profit" = "#2ecc71",
+        "break_even" = "#f39c12",
+        "near_break_even" = "#f1c40f",
+        "net_cost" = "#e74c3c"
+      )
+      
+      plot_ly(outcome_counts, labels = ~gov_outcome, values = ~n, type = "pie",
+              marker = list(colors = colors[outcome_counts$gov_outcome]),
+              textinfo = "label+percent") %>%
+        layout(showlegend = TRUE)
+    }
+  })
+  
+  output$outcome_stats <- renderUI({
+    if (!has_gov_econ) {
+      HTML("<p>Data not available</p>")
+    } else {
+      df <- filtered_data() %>% filter(!is.na(buyout_price))
+      
+      outcomes <- df %>%
+        count(gov_outcome) %>%
+        mutate(pct = 100 * n / nrow(df))
+      
+      html_text <- "<p><strong>Property Outcomes:</strong></p><ul>"
+      
+      for (i in 1:nrow(outcomes)) {
+        html_text <- paste0(html_text, 
+                            "<li>", outcomes$gov_outcome[i], ": ", outcomes$n[i], 
+                            " (", round(outcomes$pct[i], 1), "%)</li>")
+      }
+      
+      html_text <- paste0(html_text, "</ul>")
+      HTML(html_text)
+    }
+  })
+  
+  output$net_by_timing <- renderPlotly({
+    if (!has_gov_econ) {
+      plot_ly() %>% layout(title = "Data not available")
+    } else {
+      df <- filtered_data() %>% filter(!is.na(buyout_price))
+      
+      timing_summary <- df %>%
+        group_by(timing_category) %>%
+        summarise(
+          n = n(),
+          mean_net = mean(gov_net_cost, na.rm = TRUE) / 1000,
+          .groups = "drop"
+        ) %>%
+        arrange(match(timing_category, c("immediate", "early", "mid_term", "late")))
+      
+      plot_ly(timing_summary, x = ~timing_category, y = ~mean_net, type = "bar",
+              marker = list(color = ifelse(timing_summary$mean_net < 0, "#2ecc71", "#e74c3c")),
+              text = ~paste0("n=", n), textposition = "outside") %>%
+        layout(
+          title = "Average Government Net Cost by Retreat Timing",
+          xaxis = list(title = "Timing Category"),
+          yaxis = list(title = "Avg Net Cost per Property ($1000s)<br>(negative = profit)")
+        )
+    }
+  })
+  
+  output$timing_explanation <- renderUI({
+    HTML("
+      <p><strong>Key Pattern:</strong></p>
+      <ul>
+        <li><strong>Immediate retreat:</strong> Government breaks even (buyout ≈ rent + land)</li>
+        <li><strong>Late retreat:</strong> Government profits (capped buyout < total revenue)</li>
+      </ul>
+      <p>Properties with longer time horizons generate more profit because the buyout is capped at market price,
+      but government collects decades of rental income.</p>
+    ")
+  })
+  
+  # TAB 2: PROPERTY BUYOUTS OUTPUTS
+  
+  output$total_props_box <- renderInfoBox({
+    df <- baseline_data() %>% filter(!is.na(buyout_price))
+    
+    infoBox(
+      "Properties Retreating",
+      paste0(nrow(df), " of ", nrow(baseline_data())),
+      icon = icon("home"),
       color = "blue"
     )
   })
   
-  output$immediate_retreat_box <- renderValueBox({
-    immediate_pct <- mean(current_data()$retreat_year <= 10, na.rm = TRUE) * 100
-    valueBox(
-      value = paste0(round(immediate_pct, 1), "%"),
-      subtitle = "Immediate Retreat (≤10 yrs)",
-      icon = icon("exclamation-triangle"),
-      color = if(immediate_pct > 5) "red" else if(immediate_pct > 0) "yellow" else "green"
+  output$avg_buyout_box <- renderInfoBox({
+    df <- baseline_data() %>% filter(!is.na(buyout_price))
+    avg <- mean(df$buyout_price, na.rm = TRUE)
+    
+    infoBox(
+      "Avg Buyout",
+      paste0("$", round(avg / 1000, 0), "k"),
+      icon = icon("dollar-sign"),
+      color = "orange"
     )
   })
   
-  output$total_properties_box <- renderValueBox({
-    n_retreat <- sum(current_data()$retreat_year <= 100, na.rm = TRUE)
-    valueBox(
-      value = n_retreat,
-      subtitle = "Properties Requiring Retreat",
-      icon = icon("home"),
+  output$avg_market_box <- renderInfoBox({
+    df <- baseline_data() %>% filter(!is.na(buyout_price))
+    avg <- mean(df$PRICE, na.rm = TRUE)
+    
+    infoBox(
+      "Avg Market Value",
+      paste0("$", round(avg / 1000, 0), "k"),
+      icon = icon("tag"),
       color = "purple"
     )
   })
   
-  output$buyout_cost_box <- renderValueBox({
-    data <- current_data() %>% filter(retreat_year <= 100)
+  output$total_savings_box <- renderInfoBox({
+    df <- baseline_data() %>% filter(!is.na(buyout_price))
+    savings <- sum(df$buyout_savings_dollars, na.rm = TRUE)
     
-    # Check if buyout_price column exists
-    if ("buyout_price" %in% names(data) && nrow(data) > 0) {
-      total_buyout <- sum(data$buyout_price, na.rm = TRUE)
-      total_market <- sum(data$PRICE, na.rm = TRUE)
-      
-      if (total_market > 0) {
-        savings <- total_market - total_buyout
-        discount_pct <- round(100 * savings / total_market, 1)
-        
-        valueBox(
-          value = paste0("$", round(total_buyout / 1e6, 1), "M"),
-          subtitle = paste0("Buyout Cost (", discount_pct, "% discount)"),
-          icon = icon("money-bill-wave"),
-          color = if(discount_pct > 10) "green" else if(discount_pct > 0) "light-blue" else "orange"
+    color <- if(savings > 0) "green" else "red"
+    
+    infoBox(
+      "Total Savings vs Market",
+      paste0("$", round(savings / 1e6, 1), "M"),
+      icon = icon("piggy-bank"),
+      color = color
+    )
+  })
+  
+  output$buyout_scatter <- renderPlotly({
+    df <- baseline_data() %>% filter(!is.na(buyout_price))
+    
+    # Add diagonal line data
+    max_val <- max(c(df$PRICE, df$buyout_price), na.rm = TRUE)
+    
+    p <- plot_ly() %>%
+      # Main scatter
+      add_trace(
+        data = df,
+        x = ~PRICE/1000, 
+        y = ~buyout_price/1000,
+        type = "scatter", 
+        mode = "markers",
+        marker = list(
+          size = 8,
+          color = ~retreat_year,
+          colorscale = "Viridis",
+          showscale = TRUE,
+          colorbar = list(title = "Retreat<br>Year")
+        ),
+        text = ~paste0(ADDRESS, "<br>Market: $", round(PRICE/1000), "k<br>Buyout: $", 
+                       round(buyout_price/1000), "k<br>T*: ", round(retreat_year, 1)),
+        hoverinfo = "text",
+        name = "Properties"
+      ) %>%
+      # Diagonal line
+      add_trace(
+        x = c(0, max_val/1000), 
+        y = c(0, max_val/1000),
+        type = "scatter", 
+        mode = "lines",
+        line = list(dash = "dash", color = "red", width = 2),
+        name = "Buyout = Market",
+        hoverinfo = "skip",
+        showlegend = TRUE
+      ) %>%
+      layout(
+        title = "Buyout Price vs Market Value",
+        xaxis = list(title = "Market Value ($1000s)"),
+        yaxis = list(title = "Buyout Price ($1000s)"),
+        showlegend = TRUE,
+        hovermode = "closest"
+      )
+    
+    p
+  })
+  
+  output$buyout_hist <- renderPlotly({
+    df <- baseline_data() %>% filter(!is.na(buyout_price))
+    
+    plot_ly(df, x = ~buyout_price/1000, type = "histogram",
+            marker = list(color = "#3498db")) %>%
+      layout(
+        title = "Distribution of Buyout Prices",
+        xaxis = list(title = "Buyout Price ($1000s)"),
+        yaxis = list(title = "Number of Properties")
+      )
+  })
+  
+  output$buyout_table <- DT::renderDataTable({
+    df <- baseline_data() %>% 
+      filter(!is.na(buyout_price)) %>%
+      arrange(retreat_year) %>%
+      select(ADDRESS, PRICE, buyout_price, retreat_year, timing_category,
+             gov_net_cost, gov_outcome) %>%
+      mutate(
+        PRICE = round(PRICE),
+        buyout_price = round(buyout_price),
+        retreat_year = round(retreat_year, 1),
+        gov_net_cost = round(gov_net_cost)
+      )
+    
+    datatable(
+      df,
+      options = list(
+        pageLength = 15,
+        scrollX = TRUE,
+        columnDefs = list(
+          list(className = 'dt-right', targets = 1:6)
         )
-      } else {
-        valueBox(
-          value = "$0M",
-          subtitle = "Buyout Cost",
-          icon = icon("money-bill-wave"),
-          color = "gray"
+      ),
+      rownames = FALSE
+    ) %>%
+      formatCurrency(c("PRICE", "buyout_price", "gov_net_cost"), digits = 0) %>%
+      formatStyle(
+        'gov_outcome',
+        backgroundColor = styleEqual(
+          c("profit", "break_even", "near_break_even", "net_cost"),
+          c("#d4edda", "#fff3cd", "#fff3cd", "#f8d7da")
         )
-      }
+      )
+  })
+  
+  # TAB 3: SLR SCENARIOS OUTPUTS
+  
+  output$scenario_retreat_years <- renderPlotly({
+    scenario_summary <- baseline_results %>%
+      group_by(scenario) %>%
+      summarise(
+        mean_year = mean(retreat_year[retreat_year <= 80], na.rm = TRUE),
+        median_year = median(retreat_year[retreat_year <= 80], na.rm = TRUE),
+        n_retreat = sum(retreat_year <= 80),
+        .groups = "drop"
+      ) %>%
+      # Ensure correct ordering
+      mutate(scenario = factor(scenario, levels = c("Intermediate", "Intermediate_High", "High"))) %>%
+      arrange(scenario)
+    
+    plot_ly(scenario_summary, x = ~scenario, y = ~median_year, type = "bar",
+            marker = list(color = "#3498db"),
+            text = ~paste0("n=", n_retreat), textposition = "outside") %>%
+      layout(
+        title = "Median Retreat Year by SLR Scenario",
+        xaxis = list(title = "SLR Scenario", categoryorder = "array",
+                     categoryarray = c("Intermediate", "Intermediate_High", "High")),
+        yaxis = list(title = "Median Retreat Year")
+      )
+  })
+  
+  output$scenario_gov_econ <- renderPlotly({
+    if (!has_gov_econ) {
+      plot_ly() %>% layout(title = "Government economics not available")
     } else {
-      # Fallback to market value if buyout not calculated
-      total_value <- sum(data$PRICE, na.rm = TRUE)
-      valueBox(
-        value = paste0("$", round(total_value / 1e6), "M"),
-        subtitle = "Property Value at Risk",
-        icon = icon("dollar-sign"),
-        color = "orange"
+      scenario_econ <- baseline_results %>%
+        filter(!is.na(buyout_price)) %>%
+        group_by(scenario) %>%
+        summarise(
+          buyout = sum(buyout_price, na.rm = TRUE) / 1e6,
+          rent = sum(gov_rent_collected, na.rm = TRUE) / 1e6,
+          land = sum(gov_land_recovered, na.rm = TRUE) / 1e6,
+          net = sum(gov_net_cost, na.rm = TRUE) / 1e6,
+          .groups = "drop"
+        ) %>%
+        # Ensure correct ordering
+        mutate(scenario = factor(scenario, levels = c("Intermediate", "Intermediate_High", "High"))) %>%
+        arrange(scenario)
+      
+      plot_ly(scenario_econ, x = ~scenario) %>%
+        add_trace(y = ~buyout, name = "Buyout (cost)", type = "bar",
+                  marker = list(color = "#e74c3c")) %>%
+        add_trace(y = ~rent, name = "Rent (revenue)", type = "bar",
+                  marker = list(color = "#3498db")) %>%
+        add_trace(y = ~land, name = "Land (revenue)", type = "bar",
+                  marker = list(color = "#9b59b6")) %>%
+        add_trace(y = ~-net, name = "Net Profit", type = "scatter", mode = "lines+markers",
+                  line = list(color = "#2ecc71", width = 3),
+                  marker = list(size = 10)) %>%
+        layout(
+          title = "Government Economics by SLR Scenario",
+          xaxis = list(title = "SLR Scenario", categoryorder = "array",
+                       categoryarray = c("Intermediate", "Intermediate_High", "High")),
+          yaxis = list(title = "Amount ($M)"),
+          barmode = "group"
+        )
+    }
+  })
+  
+  output$cumulative_retreat <- renderPlotly({
+    # Get baseline only, all scenarios
+    cumulative_data <- baseline_results %>%
+      filter(retreat_year <= 80) %>%
+      group_by(scenario) %>%
+      arrange(retreat_year) %>%
+      mutate(cumulative = row_number()) %>%
+      ungroup()
+    
+    plot_ly(cumulative_data, x = ~retreat_year, y = ~cumulative, color = ~scenario,
+            type = "scatter", mode = "lines",
+            line = list(width = 3)) %>%
+      layout(
+        title = "Cumulative Properties Retreating Over Time",
+        xaxis = list(title = "Year"),
+        yaxis = list(title = "Cumulative Properties")
+      )
+  })
+  
+  output$scenario_interpretation <- renderUI({
+    HTML("
+      <p><strong>Key Insights:</strong></p>
+      <ul>
+        <li><strong>Higher SLR → Earlier retreat:</strong> Properties become unviable sooner</li>
+        <li><strong>Higher SLR → More properties retreat:</strong> 100% retreat under High scenario</li>
+        <li><strong>Government profit decreases with higher SLR:</strong> Less time to collect rent</li>
+      </ul>
+      <p>The program remains profitable across all SLR scenarios, but returns diminish as sea level rise accelerates.</p>
+    ")
+  })
+  
+  # TAB 4: MONTE CARLO OUTPUTS
+  
+  output$mc_sims_box <- renderInfoBox({
+    if (!has_mc) {
+      infoBox("MC Disabled", "No data", icon = icon("times"), color = "red")
+    } else {
+      df <- baseline_data()
+      n_sims <- df$mc_n_sims[1]
+      
+      infoBox(
+        "MC Simulations",
+        paste0(n_sims, " per property"),
+        icon = icon("dice"),
+        color = "blue"
       )
     }
   })
   
-  # Timing Distribution Plot
-  output$timing_dist_plot <- renderPlotly({
-    data <- current_data() %>%
-      mutate(
-        category = case_when(
-          retreat_year <= 10 ~ "Immediate (0-10)",
-          retreat_year <= 25 ~ "Early (11-25)",
-          retreat_year <= 50 ~ "Mid-term (26-50)",
-          retreat_year <= 100 ~ "Late (51-100)",
-          TRUE ~ "No Retreat (>100)"
-        ),
-        category = factor(category, levels = c(
-          "Immediate (0-10)", "Early (11-25)", "Mid-term (26-50)", 
-          "Late (51-100)", "No Retreat (>100)"
-        ))
-      ) %>%
-      count(category) %>%
-      mutate(percentage = n / sum(n) * 100)
-    
-    p <- ggplot(data, aes(x = category, y = percentage, fill = category)) +
-      geom_col() +
-      scale_fill_manual(values = c(
-        "Immediate (0-10)" = "#d73027",
-        "Early (11-25)" = "#fc8d59",
-        "Mid-term (26-50)" = "#fee08b",
-        "Late (51-100)" = "#91bfdb",
-        "No Retreat (>100)" = "#4575b4"
-      ), guide = "none") +
-      labs(x = NULL, y = "Percentage of Properties (%)") +
-      theme_minimal() +
-      theme(axis.text.x = element_text(angle = 45, hjust = 1))
-    
-    ggplotly(p)
+  output$mc_uncertainty_box <- renderInfoBox({
+    if (!has_mc) {
+      infoBox("Uncertainty", "N/A", icon = icon("question"), color = "red")
+    } else {
+      df <- baseline_data() %>% filter(mc_enabled == TRUE)
+      avg_sd <- mean(df$mc_sd_year, na.rm = TRUE)
+      
+      infoBox(
+        "Avg Uncertainty (SD)",
+        paste0("±", round(avg_sd, 1), " years"),
+        icon = icon("chart-bar"),
+        color = "yellow"
+      )
+    }
   })
   
-  # Baseline Comparison Plot
-  output$baseline_comparison_plot <- renderPlotly({
-    current_med <- median(current_data()$retreat_year[current_data()$retreat_year <= 100], 
-                          na.rm = TRUE)
-    baseline_med <- median(baseline_data()$retreat_year[baseline_data()$retreat_year <= 100], 
-                           na.rm = TRUE)
+  output$mc_range_box <- renderInfoBox({
+    if (!has_mc) {
+      infoBox("Range", "N/A", icon = icon("question"), color = "red")
+    } else {
+      df <- baseline_data() %>% filter(mc_enabled == TRUE)
+      avg_range <- mean(df$mc_range_years, na.rm = TRUE)
+      
+      infoBox(
+        "Avg 90% CI Width",
+        paste0(round(avg_range, 1), " years"),
+        icon = icon("arrows-alt-h"),
+        color = "purple"
+      )
+    }
+  })
+  
+  output$mc_confidence_box <- renderInfoBox({
+    if (!has_mc) {
+      infoBox("Confidence", "N/A", icon = icon("question"), color = "red")
+    } else {
+      df <- baseline_data() %>% filter(mc_enabled == TRUE)
+      avg_sd <- mean(df$mc_sd_year, na.rm = TRUE)
+      
+      # Determine confidence level
+      if (avg_sd < 1) {
+        level <- "Very High"
+        color <- "green"
+      } else if (avg_sd < 3) {
+        level <- "High"
+        color <- "green"
+      } else if (avg_sd < 5) {
+        level <- "Moderate"
+        color <- "yellow"
+      } else {
+        level <- "Low"
+        color <- "red"
+      }
+      
+      infoBox(
+        "Confidence Level",
+        level,
+        icon = icon("check-circle"),
+        color = color
+      )
+    }
+  })
+  
+  output$mc_histogram <- renderPlotly({
+    if (!has_mc || is.null(input$mc_property)) {
+      plot_ly() %>% layout(title = "Select a property")
+    } else {
+      df <- baseline_data()
+      prop <- df %>% filter(parcel_id == input$mc_property) %>% slice(1)
+      
+      # Get MC distributions for this property
+      mc_prop <- mc_distributions %>%
+        filter(parcel_id == input$mc_property,
+               scenario == input$slr_scenario)
+      
+      if (nrow(mc_prop) == 0) {
+        plot_ly() %>% layout(title = "No MC data for this property")
+      } else {
+        plot_ly(mc_prop, x = ~retreat_year, type = "histogram",
+                marker = list(color = "#3498db")) %>%
+          layout(
+            title = paste0("MC Distribution: ", prop$ADDRESS),
+            xaxis = list(title = "Retreat Year"),
+            yaxis = list(title = "Frequency"),
+            shapes = list(
+              # Mean line
+              list(
+                type = "line",
+                x0 = prop$mc_mean_year,
+                x1 = prop$mc_mean_year,
+                y0 = 0,
+                y1 = 1,
+                yref = "paper",
+                line = list(color = "red", width = 2, dash = "dash")
+              ),
+              # Median line
+              list(
+                type = "line",
+                x0 = prop$mc_median_year,
+                x1 = prop$mc_median_year,
+                y0 = 0,
+                y1 = 1,
+                yref = "paper",
+                line = list(color = "green", width = 2, dash = "dash")
+              )
+            ),
+            annotations = list(
+              list(x = prop$mc_mean_year, y = 1, yref = "paper",
+                   text = "Mean", showarrow = FALSE, yshift = 10,
+                   font = list(color = "red")),
+              list(x = prop$mc_median_year, y = 0.9, yref = "paper",
+                   text = "Median", showarrow = FALSE, yshift = 10,
+                   font = list(color = "green"))
+            )
+          )
+      }
+    }
+  })
+  
+  output$mc_property_stats <- renderUI({
+    if (!has_mc || is.null(input$mc_property)) {
+      HTML("<p>Select a property to see MC statistics.</p>")
+    } else {
+      df <- baseline_data()
+      prop <- df %>% filter(parcel_id == input$mc_property) %>% slice(1)
+      
+      HTML(paste0(
+        "<p><strong>Monte Carlo Statistics:</strong></p>",
+        "<ul>",
+        "<li>Mean: ", round(prop$mc_mean_year, 1), " years</li>",
+        "<li>Median: ", round(prop$mc_median_year, 1), " years</li>",
+        "<li>SD: ±", round(prop$mc_sd_year, 1), " years</li>",
+        "<li>90% CI: [", round(prop$mc_q05_year, 1), ", ", round(prop$mc_q95_year, 1), "]</li>",
+        "<li>Range: ", round(prop$mc_range_years, 1), " years</li>",
+        "</ul>"
+      ))
+    }
+  })
+  
+  output$mc_uncertainty_scatter <- renderPlotly({
+    if (!has_mc) {
+      plot_ly() %>% layout(title = "MC data not available")
+    } else {
+      df <- baseline_data() %>% filter(mc_enabled == TRUE)
+      
+      plot_ly(df, x = ~retreat_year, y = ~mc_sd_year,
+              type = "scatter", mode = "markers",
+              marker = list(
+                size = 8,
+                color = ~timing_category,
+                colorscale = "Viridis"
+              ),
+              text = ~paste0(ADDRESS, "<br>T*: ", round(retreat_year, 1), 
+                             "<br>SD: ", round(mc_sd_year, 1)),
+              hoverinfo = "text") %>%
+        layout(
+          title = "Uncertainty vs Retreat Timing",
+          xaxis = list(title = "Mean Retreat Year"),
+          yaxis = list(title = "Uncertainty (SD in years)")
+        )
+    }
+  })
+  
+  output$mc_community_stats <- renderUI({
+    if (!has_mc) {
+      HTML("<p>MC data not available.</p>")
+    } else {
+      df <- baseline_data() %>% filter(mc_enabled == TRUE)
+      
+      HTML(paste0(
+        "<p><strong>Community-Wide Statistics:</strong></p>",
+        "<ul>",
+        "<li>Properties analyzed: ", nrow(df), "</li>",
+        "<li>Mean uncertainty: ±", round(mean(df$mc_sd_year, na.rm = TRUE), 2), " years</li>",
+        "<li>Mean 90% CI width: ", round(mean(df$mc_range_years, na.rm = TRUE), 2), " years</li>",
+        "<li>Max uncertainty: ±", round(max(df$mc_sd_year, na.rm = TRUE), 1), " years</li>",
+        "</ul>",
+        "<p>Low uncertainty indicates that flood risk signal is strong and consistent across different storm scenarios.</p>"
+      ))
+    }
+  })
+  
+  # TAB 5: MAP OUTPUTS
+  
+  output$retreat_map <- renderLeaflet({
+    df <- filtered_data()  # Changed from baseline_data() to filtered_data()
     
-    comparison <- data.frame(
-      scenario = c("Baseline", "Current"),
-      median_year = c(baseline_med, current_med)
+    # Create color palette - ORDERED BY TIMING!
+    # immediate (red) → early (orange) → mid_term (yellow) → late (blue) → no_retreat (gray)
+    pal <- colorFactor(
+      palette = c(
+        "immediate" = "#d73027",    # Red (urgent!)
+        "early" = "#fc8d59",         # Orange  
+        "mid_term" = "#fee08b",      # Yellow
+        "late" = "#91bfdb",          # Light blue
+        "no_retreat" = "#4575b4"     # Dark blue
+      ),
+      levels = c("immediate", "early", "mid_term", "late", "no_retreat")  # Explicit order
     )
     
-    p <- ggplot(comparison, aes(x = scenario, y = median_year, fill = scenario)) +
-      geom_col(width = 0.6) +
-      scale_fill_manual(values = c("Baseline" = "#1f77b4", "Current" = "#ff7f0e"), guide = "none") +
-      geom_text(aes(label = round(median_year, 1)), vjust = -0.5, size = 5) +
-      labs(x = NULL, y = "Median Retreat Year") +
-      ylim(0, max(c(baseline_med, current_med), na.rm = TRUE) * 1.15) +
-      theme_minimal()
-    
-    ggplotly(p)
-  })
-  
-  # Property Table
-  output$property_table <- DT::renderDataTable({
-    data <- current_data()
-    
-    # Check if elevation column exists and has values
-    has_elevation <- "elevation" %in% names(data) && any(!is.na(data$elevation))
-    
-    # Check if cliff distance exists
-    has_cliff_dist <- "initial_cliff_dist" %in% names(data) && any(!is.na(data$initial_cliff_dist))
-    
-    # Check if buyout columns exist
-    if ("buyout_price" %in% names(data) && any(!is.na(data$buyout_price))) {
-      result <- data %>%
-        filter(retreat_year <= 100) %>%  # Only show properties that retreat
-        mutate(
-          # Calculate discount BEFORE formatting
-          discount_pct = ifelse(!is.na(buyout_price) & !is.na(PRICE) & PRICE > 0,
-                                100 * (PRICE - buyout_price) / PRICE,
-                                NA),
-          # Now format for display
-          PRICE_display = scales::dollar(PRICE),
-          buyout_display = scales::dollar(buyout_price),
-          discount_display = ifelse(!is.na(discount_pct),
-                                    paste0(round(discount_pct, 1), "%"),
-                                    "N/A")
-        )
-      
-      # Build column selection based on available data
-      select_cols <- c("ADDRESS", "PRICE_display", "retreat_year", "buyout_display", 
-                       "discount_display", "retreat_trigger")
-      rename_map <- c(
-        Address = "ADDRESS",
-        `Market Price` = "PRICE_display",
-        `Retreat Year` = "retreat_year",
-        `Buyout Price` = "buyout_display",
-        `Discount` = "discount_display",
-        `Trigger` = "retreat_trigger"
-      )
-      
-      if (has_cliff_dist) {
-        result <- result %>% mutate(cliff_dist_display = round(initial_cliff_dist, 1))
-        select_cols <- c(select_cols, "cliff_dist_display")
-        rename_map <- c(rename_map, `Cliff Dist (m)` = "cliff_dist_display")
-      }
-      
-      if (has_elevation) {
-        result <- result %>% mutate(elevation_display = round(elevation, 2))
-        select_cols <- c(select_cols, "elevation_display")
-        rename_map <- c(rename_map, `Elevation (m)` = "elevation_display")
-      }
-      
-      result %>%
-        select(all_of(select_cols)) %>%
-        rename(all_of(rename_map))
-    } else {
-      result <- data %>%
-        filter(retreat_year <= 100) %>%
-        mutate(PRICE_display = scales::dollar(PRICE))
-      
-      select_cols <- c("ADDRESS", "PRICE_display", "retreat_year", "retreat_trigger")
-      rename_map <- c(
-        Address = "ADDRESS",
-        Price = "PRICE_display",
-        `Retreat Year` = "retreat_year",
-        `Trigger` = "retreat_trigger"
-      )
-      
-      if (has_cliff_dist) {
-        result <- result %>% mutate(cliff_dist_display = round(initial_cliff_dist, 1))
-        select_cols <- c(select_cols, "cliff_dist_display")
-        rename_map <- c(rename_map, `Cliff Dist (m)` = "cliff_dist_display")
-      }
-      
-      if (has_elevation) {
-        result <- result %>% mutate(elevation_display = round(elevation, 2))
-        select_cols <- c(select_cols, "elevation_display")
-        rename_map <- c(rename_map, `Elevation (m)` = "elevation_display")
-      }
-      
-      result %>%
-        select(all_of(select_cols)) %>%
-        rename(all_of(rename_map))
-    }
-  }, options = list(pageLength = 10, scrollX = TRUE))
-  
-  # Map
-  output$retreat_map <- renderLeaflet({
-    # Use current_data() which already has correct filtering
-    data_sf <- current_data() %>%
-      filter(!is.na(LATITUDE), !is.na(LONGITUDE)) %>%
-      st_as_sf(coords = c("LONGITUDE", "LATITUDE"), crs = 4326, remove = FALSE) %>%
-      mutate(
-        color = case_when(
-          retreat_year <= 10 ~ "#d73027",
-          retreat_year <= 25 ~ "#fc8d59",
-          retreat_year <= 50 ~ "#fee08b",
-          retreat_year <= 100 ~ "#91bfdb",
-          TRUE ~ "#4575b4"
-        )
-      )
-    
-    # Build popup with conditional buyout info
-    if ("buyout_price" %in% names(data_sf) && any(!is.na(data_sf$buyout_price))) {
-      # Create buyout info for each property
-      buyout_info <- sapply(1:nrow(data_sf), function(i) {
-        if (!is.na(data_sf$buyout_price[i]) && !is.na(data_sf$PRICE[i])) {
-          savings <- data_sf$PRICE[i] - data_sf$buyout_price[i]
-          savings_pct <- 100 * savings / data_sf$PRICE[i]
-          paste0("Buyout Cost: $", format(round(data_sf$buyout_price[i]), big.mark = ","), "<br>",
-                 "Savings: $", format(round(savings), big.mark = ","), 
-                 " (", round(savings_pct, 1), "%)<br>")
-        } else {
-          ""
-        }
-      })
-      
-      # Add cliff distance if available
-      cliff_info <- if ("initial_cliff_dist" %in% names(data_sf) && any(!is.na(data_sf$initial_cliff_dist))) {
-        paste0("Cliff Distance: ", round(data_sf$initial_cliff_dist, 1), "m<br>")
-      } else {
-        ""
-      }
-      
-      # Add elevation if available
-      elev_info <- if ("elevation" %in% names(data_sf) && any(!is.na(data_sf$elevation))) {
-        paste0("Elevation: ", round(data_sf$elevation, 2), "m")
-      } else {
-        ""
-      }
-      
-      popup_text <- paste0(
-        "<b>", data_sf$ADDRESS, "</b><br>",
-        "Retreat Year: ", data_sf$retreat_year, "<br>",
-        "Market Price: $", format(data_sf$PRICE, big.mark = ","), "<br>",
-        buyout_info,
-        cliff_info,
-        elev_info
-      )
-    } else {
-      # Add cliff distance if available
-      cliff_info <- if ("initial_cliff_dist" %in% names(data_sf) && any(!is.na(data_sf$initial_cliff_dist))) {
-        paste0("Cliff Distance: ", round(data_sf$initial_cliff_dist, 1), "m<br>")
-      } else {
-        ""
-      }
-      
-      # Add elevation if available
-      elev_info <- if ("elevation" %in% names(data_sf) && any(!is.na(data_sf$elevation))) {
-        paste0("Elevation: ", round(data_sf$elevation, 2), "m")
-      } else {
-        ""
-      }
-      
-      popup_text <- paste0(
-        "<b>", data_sf$ADDRESS, "</b><br>",
-        "Retreat Year: ", data_sf$retreat_year, "<br>",
-        "Price: $", format(data_sf$PRICE, big.mark = ","), "<br>",
-        cliff_info,
-        elev_info
-      )
-    }
-    
-    leaflet(data_sf) %>%
-      addProviderTiles(providers$CartoDB.Positron) %>%
+    # Create map
+    leaflet(df) %>%
+      addTiles() %>%
       addCircleMarkers(
-        radius = 6,
-        color = ~color,
-        fillColor = ~color,
-        fillOpacity = 0.7,
+        ~LONGITUDE, ~LATITUDE,
+        radius = 8,
+        color = ~pal(timing_category),
+        fillOpacity = 0.8,
+        stroke = TRUE,
         weight = 1,
-        popup = popup_text
+        popup = ~paste0(
+          "<strong>", ADDRESS, "</strong><br>",
+          "Retreat Year: ", round(retreat_year, 1), "<br>",
+          "Category: ", timing_category, "<br>",
+          "Market Value: $", format(PRICE, big.mark = ","), "<br>",
+          "Buyout: $", format(buyout_price, big.mark = ",")
+        ),
+        layerId = ~parcel_id
       ) %>%
       addLegend(
         position = "bottomright",
-        colors = c("#d73027", "#fc8d59", "#fee08b", "#91bfdb", "#4575b4"),
-        labels = c("Immediate", "Early", "Mid-term", "Late", "No Retreat"),
-        title = "Retreat Timing"
+        pal = pal,
+        values = ~timing_category,
+        title = "Retreat Timing",
+        opacity = 1
       )
   })
   
-  # Parameter Summary
-  output$param_summary <- renderText({
-    paste0(
-      "SLR Scenario: ", input$slr_scenario, "\n",
-      "Rental Yield: ", input$rental_yield, "%\n",
-      "Discount Rate: ", input$discount_rate, "%\n",
-      "Damage Threshold: ", input$damage_threshold, " cm\n",
-      "Owner Utility: $", format(input$owner_utility, big.mark = ","), "/year\n",
-      "Storm Scenario: ", input$storm_scenario
-    )
-  })
-  
-  # Summary Table
-  output$summary_table <- DT::renderDataTable({
-    data <- current_data() %>%
-      filter(retreat_year <= 100) %>%  # Only include properties that retreat
-      mutate(
-        category = case_when(
-          retreat_year <= 10 ~ "Immediate (0-10)",
-          retreat_year <= 25 ~ "Early (11-25)",
-          retreat_year <= 50 ~ "Mid-term (26-50)",
-          retreat_year <= 100 ~ "Late (51-100)",
-          TRUE ~ "No Retreat"
-        ),
-        category = factor(category, levels = c(
-          "Immediate (0-10)", "Early (11-25)", "Mid-term (26-50)", "Late (51-100)"
-        ))
-      )
+  output$selected_property_info <- renderUI({
+    click <- input$retreat_map_marker_click
     
-    # Check if we have any data
-    if (nrow(data) == 0) {
-      return(data.frame(
-        `Retreat Category` = "No properties retreat",
-        `Number of Properties` = 0,
-        check.names = FALSE
-      ))
-    }
-    
-    # Check for elevation
-    has_elevation <- "elevation" %in% names(data) && any(!is.na(data$elevation))
-    
-    # Check if buyout columns exist
-    if ("buyout_price" %in% names(data) && any(!is.na(data$buyout_price))) {
-      if (has_elevation) {
-        summary_df <- data %>%
-          group_by(category, .drop = FALSE) %>%
-          summarise(
-            `Number of Properties` = n(),
-            `Avg Property Value` = mean(PRICE, na.rm = TRUE),
-            `Total Market Value` = sum(PRICE, na.rm = TRUE),
-            `Total Buyout Cost` = sum(buyout_price, na.rm = TRUE),
-            `Total Savings` = sum(PRICE - buyout_price, na.rm = TRUE),
-            `Avg Discount %` = 100 * mean((PRICE - buyout_price) / PRICE, na.rm = TRUE),
-            `Avg Elevation (m)` = mean(elevation, na.rm = TRUE),
-            .groups = "drop"
-          ) %>%
-          filter(`Number of Properties` > 0) %>%
-          mutate(
-            `Avg Property Value` = scales::dollar(`Avg Property Value`),
-            `Total Market Value` = scales::dollar(`Total Market Value`),
-            `Total Buyout Cost` = scales::dollar(`Total Buyout Cost`),
-            `Total Savings` = scales::dollar(`Total Savings`),
-            `Avg Discount %` = paste0(round(`Avg Discount %`, 1), "%"),
-            `Avg Elevation (m)` = round(`Avg Elevation (m)`, 2)
-          ) %>%
-          rename(`Retreat Category` = category)
-      } else {
-        summary_df <- data %>%
-          group_by(category, .drop = FALSE) %>%
-          summarise(
-            `Number of Properties` = n(),
-            `Avg Property Value` = mean(PRICE, na.rm = TRUE),
-            `Total Market Value` = sum(PRICE, na.rm = TRUE),
-            `Total Buyout Cost` = sum(buyout_price, na.rm = TRUE),
-            `Total Savings` = sum(PRICE - buyout_price, na.rm = TRUE),
-            `Avg Discount %` = 100 * mean((PRICE - buyout_price) / PRICE, na.rm = TRUE),
-            .groups = "drop"
-          ) %>%
-          filter(`Number of Properties` > 0) %>%
-          mutate(
-            `Avg Property Value` = scales::dollar(`Avg Property Value`),
-            `Total Market Value` = scales::dollar(`Total Market Value`),
-            `Total Buyout Cost` = scales::dollar(`Total Buyout Cost`),
-            `Total Savings` = scales::dollar(`Total Savings`),
-            `Avg Discount %` = paste0(round(`Avg Discount %`, 1), "%")
-          ) %>%
-          rename(`Retreat Category` = category)
-      }
-      
-      return(summary_df)
+    if (is.null(click)) {
+      HTML("<p>Click on a property to see details.</p>")
     } else {
-      if (has_elevation) {
-        summary_df <- data %>%
-          group_by(category, .drop = FALSE) %>%
-          summarise(
-            `Number of Properties` = n(),
-            `Avg Property Value` = mean(PRICE, na.rm = TRUE),
-            `Total Value at Risk` = sum(PRICE, na.rm = TRUE),
-            `Avg Elevation (m)` = mean(elevation, na.rm = TRUE),
-            .groups = "drop"
-          ) %>%
-          filter(`Number of Properties` > 0) %>%
-          mutate(
-            `Avg Property Value` = scales::dollar(`Avg Property Value`),
-            `Total Value at Risk` = scales::dollar(`Total Value at Risk`),
-            `Avg Elevation (m)` = round(`Avg Elevation (m)`, 2)
-          ) %>%
-          rename(`Retreat Category` = category)
+      df <- filtered_data()  # Changed from baseline_data() to filtered_data()
+      prop <- df %>% filter(parcel_id == click$id) %>% slice(1)
+      
+      if (nrow(prop) == 0) {
+        HTML("<p>Property not found.</p>")
       } else {
-        summary_df <- data %>%
-          group_by(category, .drop = FALSE) %>%
-          summarise(
-            `Number of Properties` = n(),
-            `Avg Property Value` = mean(PRICE, na.rm = TRUE),
-            `Total Value at Risk` = sum(PRICE, na.rm = TRUE),
-            .groups = "drop"
-          ) %>%
-          filter(`Number of Properties` > 0) %>%
-          mutate(
-            `Avg Property Value` = scales::dollar(`Avg Property Value`),
-            `Total Value at Risk` = scales::dollar(`Total Value at Risk`)
-          ) %>%
-          rename(`Retreat Category` = category)
+        HTML(paste0(
+          "<h4>", prop$ADDRESS, "</h4>",
+          "<p><strong>Property Details:</strong></p>",
+          "<ul>",
+          "<li>Market Value: $", format(prop$PRICE, big.mark = ","), "</li>",
+          "<li>Retreat Year: ", round(prop$retreat_year, 1), "</li>",
+          "<li>Timing: ", prop$timing_category, "</li>",
+          "<li>Trigger: ", prop$retreat_trigger, "</li>",
+          "</ul>"
+        ))
       }
-      
-      return(summary_df)
     }
-  }, options = list(pageLength = 10, dom = 't', ordering = FALSE))
-  
-  # Retreat Histogram
-  output$retreat_histogram <- renderPlotly({
-    p <- ggplot(current_data() %>% filter(retreat_year <= 100), 
-                aes(x = retreat_year)) +
-      geom_histogram(binwidth = 5, fill = "#1f77b4", alpha = 0.7) +
-      labs(x = "Retreat Year", y = "Number of Properties") +
-      theme_minimal()
-    
-    ggplotly(p)
   })
   
-  # Economic Impact Plot
-  output$economic_impact_plot <- renderPlotly({
-    data <- current_data() %>%
-      mutate(
-        category = case_when(
-          retreat_year <= 10 ~ "Immediate (0-10)",
-          retreat_year <= 25 ~ "Early (11-25)",
-          retreat_year <= 50 ~ "Mid-term (26-50)",
-          retreat_year <= 100 ~ "Late (51-100)",
-          TRUE ~ "No Retreat (>100)"
-        ),
-        category = factor(category, levels = c(
-          "Immediate (0-10)", "Early (11-25)", "Mid-term (26-50)", 
-          "Late (51-100)", "No Retreat (>100)"
-        ))
-      ) %>%
-      group_by(category) %>%
-      summarise(total_value = sum(PRICE, na.rm = TRUE) / 1e6, .groups = "drop")
+  output$selected_property_econ <- renderUI({
+    click <- input$retreat_map_marker_click
     
-    p <- ggplot(data, aes(x = category, y = total_value, fill = category)) +
-      geom_col() +
-      scale_fill_manual(values = c(
-        "Immediate (0-10)" = "#d73027",
-        "Early (11-25)" = "#fc8d59",
-        "Mid-term (26-50)" = "#fee08b",
-        "Late (51-100)" = "#91bfdb",
-        "No Retreat (>100)" = "#4575b4"
-      ), guide = "none") +
-      labs(x = NULL, y = "Total Property Value ($ Millions)") +
-      theme_minimal() +
-      theme(axis.text.x = element_text(angle = 45, hjust = 1))
-    
-    ggplotly(p)
-  })
-  
-  # Buyout Comparison Plot
-  output$buyout_comparison_plot <- renderPlotly({
-    data <- current_data() %>%
-      filter(retreat_year <= 100) %>%
-      mutate(
-        category = case_when(
-          retreat_year <= 10 ~ "Immediate\n(0-10)",
-          retreat_year <= 25 ~ "Early\n(11-25)",
-          retreat_year <= 50 ~ "Mid-term\n(26-50)",
-          retreat_year <= 100 ~ "Late\n(51-100)",
-          TRUE ~ "No Retreat"
-        ),
-        category = factor(category, levels = c(
-          "Immediate\n(0-10)", "Early\n(11-25)", "Mid-term\n(26-50)", 
-          "Late\n(51-100)"
-        ))
-      )
-    
-    # Check if buyout columns exist
-    if ("buyout_price" %in% names(data) && nrow(data) > 0) {
-      summary_data <- data %>%
-        group_by(category) %>%
-        summarise(
-          n_properties = n(),
-          market_value = sum(PRICE, na.rm = TRUE) / 1e6,
-          buyout_cost = sum(buyout_price, na.rm = TRUE) / 1e6,
-          savings = market_value - buyout_cost,
-          .groups = "drop"
-        ) %>%
-        tidyr::pivot_longer(
-          cols = c(market_value, buyout_cost),
-          names_to = "type",
-          values_to = "value"
-        ) %>%
-        mutate(
-          type = factor(type, 
-                        levels = c("market_value", "buyout_cost"),
-                        labels = c("Market Value", "Buyout Cost"))
-        )
-      
-      p <- ggplot(summary_data, aes(x = category, y = value, fill = type)) +
-        geom_col(position = "dodge", alpha = 0.8) +
-        scale_fill_manual(values = c("Market Value" = "#e41a1c", "Buyout Cost" = "#377eb8")) +
-        labs(
-          x = "Retreat Timing Category",
-          y = "Total Value ($ Millions)",
-          fill = NULL,
-          title = "Buyout Cost vs Market Value by Timing"
-        ) +
-        theme_minimal() +
-        theme(
-          legend.position = "top",
-          axis.text.x = element_text(size = 9)
-        )
+    if (is.null(click) || !has_gov_econ) {
+      HTML("")
     } else {
-      # Fallback if no buyout data
-      summary_data <- data %>%
-        group_by(category) %>%
-        summarise(
-          market_value = sum(PRICE, na.rm = TRUE) / 1e6,
-          .groups = "drop"
-        )
+      df <- filtered_data()  # Changed from baseline_data() to filtered_data()
+      prop <- df %>% filter(parcel_id == click$id) %>% slice(1)
       
-      p <- ggplot(summary_data, aes(x = category, y = market_value)) +
-        geom_col(fill = "#e41a1c", alpha = 0.8) +
-        labs(
-          x = "Retreat Timing Category",
-          y = "Total Market Value ($ Millions)",
-          title = "Market Value at Risk (Buyout data not available)"
-        ) +
-        theme_minimal() +
-        theme(axis.text.x = element_text(size = 9))
+      if (nrow(prop) == 0 || is.na(prop$buyout_price)) {
+        HTML("")
+      } else {
+        HTML(paste0(
+          "<p><strong>Economics:</strong></p>",
+          "<ul>",
+          "<li>Buyout: $", format(round(prop$buyout_price), big.mark = ","), "</li>",
+          "<li>Rent NPV: $", format(round(prop$gov_rent_collected), big.mark = ","), "</li>",
+          "<li>Land: $", format(round(prop$gov_land_recovered), big.mark = ","), "</li>",
+          "<li>Gov Net: $", format(round(prop$gov_net_cost), big.mark = ","), "</li>",
+          "<li>Outcome: <strong>", prop$gov_outcome, "</strong></li>",
+          "</ul>"
+        ))
+      }
     }
-    
-    ggplotly(p)
+  })
+  
+  # RESET BUTTON
+  
+  observeEvent(input$reset, {
+    updateSliderInput(session, "rental_yield", value = 5)
+    updateSliderInput(session, "discount_rate", value = 2.0)
+    updateSliderInput(session, "damage_threshold", value = 15)
+    updateSelectInput(session, "slr_scenario", selected = scenarios[1])  # Intermediate
   })
 }
 
 
 # RUN APP
-
 shinyApp(ui, server)
+

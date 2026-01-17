@@ -24,7 +24,7 @@ library(stringr)
 
 
 # CONFIGURATION
-case_name <- "carpinteria"  # Change for other sites
+case_name <- "king_salmon"  # Change for other sites
 data_dir <- file.path("data", case_name)
 derived_dir <- file.path(data_dir, "derived")
 

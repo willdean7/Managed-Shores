@@ -39,7 +39,7 @@ library(mgcv)
 
 # CONFIGURATION - EDIT THIS SECTION FOR EACH CASE STUDY
 # Study area configuration
-CASE_NAME <- "pacifica"  # Change to study area: carpinteria, pacifica, stinson, etc.
+CASE_NAME <- "king_salmon"  # Change to study area: carpinteria, pacifica, stinson, isla_vista, etc.
 DATA_DIR <- here("data", CASE_NAME)
 dir.create(DATA_DIR, recursive = TRUE, showWarnings = FALSE)
 
@@ -47,19 +47,40 @@ dir.create(DATA_DIR, recursive = TRUE, showWarnings = FALSE)
 # Recommendation: Set to ~50-70% of local median home price
 # 
 # How to set this:
-#   1. Look up median home price for your area (Zillow, Redfin, etc.)
+#   1. Look up median home price for your area (Redfin, Zillow)
 #   2. Set threshold to 50-70% of that median
 #   3. Higher % = fewer flags (only catch obvious outliers)
 #   4. Lower % = more flags (catch more potentially old sale data)
 #
-# Example thresholds for California coastal towns:
-#   Carpinteria:   $1,100,000  (median ~$1.85M)
-#   Malibu:        $2,000,000  (median ~$3.5M)
-#   Pacifica:      $800,000    (median ~$1.3M)
-#   Capitola:      $900,000    (median ~$1.5M)
-#   Stinson Beach: $1,500,000  (median ~$2.5M)
+# Example thresholds for California coastal towns (2024-2025 data):
+#   Carpinteria:   $950,000    (median ~$1.35-1.40M, Redfin/Rocket Homes 2025)
+#   Isla Vista:    $850,000    (median ~$1.35-1.40M single-family, Zillow 2025)*
+#   King Salmon:   $270,000    (median ~$400-450K est., Humboldt County MLS 2025)**
+#   Malibu:        $1,900,000  (median ~$2.9-3.3M, Redfin/Zillow Nov 2025)
+#   Pacifica:      $750,000    (median ~$1.15-1.30M, Redfin/ATTOM 2025)
+#   Stinson Beach: $3,300,000  (median ~$5.0-5.2M, Redfin/PropertyShark 2025)
+#
+# Sources: 
+#   - Redfin Housing Market Reports (accessed Jan 2026)
+#   - Zillow Home Value Index (accessed Jan 2026)
+#   - PropertyShark Market Analysis (accessed Jan 2026)
+#   - Rocket Homes/ATTOM Market Reports (2025)
+#   - Humboldt Association of REALTORS® (2025)
+#
+# Market-specific notes:
+#   * Isla Vista: Market dominated by UCSB student housing; median varies 
+#     significantly ($625K-$3M) depending on whether multi-family rental 
+#     properties vs. single-family homes are included. Use $850K threshold 
+#     to capture typical coastal residential properties.
+#
+#   ** King Salmon: Very small community (~200-300 people) with limited sales 
+#      data. Estimated median based on Humboldt County median ($425K), Eureka 
+#      median ($380K), and observed listing range ($275K-$540K). Community 
+#      characterized as "affordable waterfront" and is identified as highest 
+#      sea level rise vulnerability on U.S. West Coast—critical for managed 
+#      retreat analysis.
 
-PRICE_THRESHOLD <- 800000  # ← UPDATE THIS for each case study location
+PRICE_THRESHOLD <- 270000  # ← UPDATE THIS for each case study location
 
 # Validation flags
 RUN_CROSS_VALIDATION <- TRUE  # Set FALSE for faster runs (but less validation)
@@ -222,7 +243,6 @@ redfin_df <- redfin_df %>% dplyr::select(-flag_low_price, -assessed_or_estimate)
 
 # PART 3: Geocoding
 
-
 message("→ Geocoding property addresses...")
 
 library(tidygeocoder)
@@ -265,11 +285,10 @@ message("✓ Successfully geocoded ", n_geocoded, " / ", nrow(redfin_geocoded), 
 redfin_sf <- st_as_sf(redfin_geocoded, coords = c("LONGITUDE", "LATITUDE"), crs = 4326)
 
 # Optional: Visualize to check geocoding quality
-# mapview(redfin_sf, zcol = "SALE TYPE", col.regions = c("blue", "green"))
+mapview(redfin_sf, zcol = "SALE TYPE", col.regions = c("blue", "green"))
 
 
 # PART 4: Apply Baseline Rental Yield
-
 
 message("→ Applying baseline rental yield from literature...\n")
 
@@ -289,12 +308,10 @@ message("  → Baseline annual yield: ", BASELINE_YIELD_PCT, "%")
 message("  → Justification: Literature-based estimate")
 message("  → Note: Scraped Redfin rental estimates were unreliable (1-3% yields)")
 message("          suggesting data quality issues with online rental listings")
-message("")
 message("  Sensitivity analysis will test:")
 message("    - Conservative: ", BASELINE_YIELD_PCT - 1, "%")
 message("    - Baseline: ", BASELINE_YIELD_PCT, "%")
 message("    - Optimistic: ", BASELINE_YIELD_PCT + 1, "%")
-message("")
 
 # Calculate monthly rental value for each property
 redfin_df <- redfin_df %>%
