@@ -1,101 +1,241 @@
-# Managed-Shores
+# Managed Shores
 
 ## Project Description
-A framework and financial modeling toolkit for managed shoreline retreat in California.
+A buyout-leaseback economic modeling framework for managed coastal retreat in California, integrating high-resolution sea level rise hazard data with property-scale financial analysis to determine optimal retreat timing under climate change scenarios.
 
 ## Motivation
-Rising sea levels threaten California’s coastlines. This project provides tools and analysis to support local adaptation and managed retreat strategies.
+Rising sea levels and coastal hazards threaten California's coastal communities and property values. Traditional adaptation approaches often focus on hard armoring or abrupt relocation. This project develops and applies a novel "buyout-leaseback" model where governments purchase at-risk properties before catastrophic damage but lease them back to current owners, allowing continued use while managing long-term risk. The framework provides tools to evaluate when retreat becomes economically optimal compared to continued occupancy.
 
 ## Methods and Approach
--Wave Runup and Flood Risk Modeling:
-High-resolution modeling of coastal wave run-up, flood exposure, and parcel-level flood risk using open geospatial and oceanographic data.
 
--Financial Evaluation:
-Buyout-leaseback and managed retreat financial modeling, including net present value (NPV) of rental income, structure/land value, and flood damages.
+### CoSMoS Hazard Data Integration
+High-resolution coastal hazard modeling using USGS CoSMoS (Coastal Storm Modeling System) data including:
+- Sea level rise inundation scenarios (0-10 feet SLR)
+- Episodic coastal flooding from storm events
+- Chronic beach and cliff erosion projections
+- Wave impacts and coastal change envelopes
 
--Case Studies and Qualitative Analysis:
-Application to real-world California communities (e.g., Carpinteria, Silver Strand) with integration of property, land, and demographic data.
+### Buyout-Leaseback Economic Model
+Novel financial framework evaluating:
+- Net present value (NPV) of government buyout-leaseback programs
+- Optimal retreat timing balancing rental income against flood damages
+- Structure depreciation and land value appreciation over time
+- Government vs. private property owner economic perspectives
+- Sensitivity analysis across discount rates, damage scenarios, and SLR projections
 
--Interactive Dashboards:
-Shiny dashboards for exploring retreat timing, vulnerability, and economic/physical risk drivers.
+### Case Studies
+Application to five California coastal communities:
+- **Carpinteria** - Mix of residential and commercial beachfront
+- **Isla Vista** - High-density student housing on coastal bluffs
+- **King Salmon** - Low-income community on Humboldt Bay
+- **Pacifica** - Eroding bluff properties south of San Francisco
+- **Silver Strand** - Narrow barrier island in Oxnard
 
+### Interactive Visualization
+Shiny dashboard (`cosmos_shiny_v2.R`) for exploring:
+- Property-level retreat timing and economic outcomes
+- Spatial patterns of vulnerability and optimal retreat years
+- Comparison across case studies and scenarios
+- Real-time parameter sensitivity testing
 
 ## Repository Structure
-Managed-Shores/
+```
+Managed_Shores/
 ├── code/
-│   ├── raw/                  # Original, unmodified data and scripts
-│   ├── processed/            # Cleaned and derived datasets/scripts
-│   ├── redfin_data_code_ms.R # Property data cleaning, price/rent scraping, geocoding
-│   ├── waves_ms.R            # Regional wave run-up modeling
-│   ├── waves_ms_parcel.R     # Parcel-level wave run-up assignment
-│   ├── MSGRP_ms.R            # Economic modeling, NPV, and retreat timing
-│   ├── calc_vulnerability_metrics.R # Vulnerability metric calculation
-│   ├── comparisons.R         # Shiny dashboard for retreat/vulnerability comparison
-│   └── README.md             # Code folder documentation
+│   ├── processed/                          # Current analysis scripts
+│   │   ├── extract_cosmos_metrics_unified.R   # CoSMoS data extraction
+│   │   ├── cosmos_process.R                   # Hazard data processing
+│   │   ├── cosmos_process_cliff.R             # Cliff erosion processing
+│   │   ├── interpolate_cosmos.R               # Spatial interpolation
+│   │   ├── redfin_data_code_ms.R             # Property data processing
+│   │   ├── cosmos_valuation_v3.R             # Main economic model (CURRENT)
+│   │   ├── monte_carlo_storms.R              # Storm damage uncertainty
+│   │   └── cosmos_shiny_v2.R                 # Interactive dashboard (CURRENT)
+│   ├── archive/                            # Deprecated script versions
+│   ├── raw/                                # Original collaborator scripts
+│   └── README.md                           # Code documentation
 ├── data/
-│   ├── raw/                  # Raw data files (Redfin, land values, wave data, etc.)
-│   ├── processed/            # Processed/cleaned datasets for analysis
-│   └── README.md             # Data folder documentation
-├── doc/
-│   ├── LICENSE-data.txt      # Data/documentation license (CC BY 4.0)
-│   └── ...                   # Project reports, figures, supplementary docs
-├── LICENSE                   # Code license (MIT)
-├── README.md                 # This general project README
-└── .gitignore                # Files to be excluded from version control
-
+│   ├── carpinteria/                        # Case study: Carpinteria
+│   │   ├── cosmos/                         # CoSMoS hazard data
+│   │   ├── derived/                        # Processed datasets
+│   │   └── redfin_2025-01.csv             # Property data
+│   ├── isla_vista/                         # Case study: Isla Vista
+│   ├── king_salmon/                        # Case study: King Salmon
+│   ├── pacifica/                           # Case study: Pacifica
+│   ├── silver_strand/                      # Case study: Silver Strand
+│   ├── landprices_CA_ms.csv               # State land value index
+│   └── README.md                           # Data documentation
+├── doc/                                    # Project documentation
+│   └── LICENSE-data.txt                    # Data license (CC BY 4.0)
+├── LICENSE                                 # Code license (MIT)
+├── README.md                               # This file
+├── .gitignore                              # Version control exclusions
+└── Managed_Shores.Rproj                   # RStudio project file
+```
 
 ## Installation
-Prerequisites:
-R (>= 4.0) and RStudio recommended
-R packages: tidyverse, sf, rnaturalearth, elevatr, tidygeocoder, mapview, shiny, shinydashboard, plotly, DT, and others as called in scripts
 
-Clone the repository:
-https://github.com/willdean7/Managed-Shores.git
+### Prerequisites
+- **R** (>= 4.0) and RStudio recommended
+- **R packages**: 
+  ```r
+  # Core packages
+  install.packages(c("tidyverse", "sf", "terra", "raster"))
+  
+  # Spatial analysis
+  install.packages(c("lwgeom", "stars", "units"))
+  
+  # Data acquisition
+  install.packages(c("tidycensus", "rvest", "httr"))
+  
+  # Visualization
+  install.packages(c("shiny", "leaflet", "plotly", "DT"))
+  ```
 
-Download or place raw data files into data/raw/ as needed.
+### Setup
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/willdean7/Managed-Shores.git
+   cd Managed_Shores
+   ```
+
+2. Open `Managed_Shores.Rproj` in RStudio
+
+3. CoSMoS data can be downloaded from [USGS CoSMoS](https://www.usgs.gov/apps/coastal-storm-modeling-system-cosmos) or contact the project authors for preprocessed datasets
 
 ## Usage
-Data Preparation:
-Run code/redfin_data_code_ms.R to clean and enrich property data.
 
-Wave Runup Modeling:
-Use code/waves_ms.R or code/waves_ms_parcel.R for regional and parcel-level wave run-up estimates.
+### Complete Analysis Workflow
 
-Economic and Retreat Modeling:
-Run code/MSGRP_ms.R to integrate property, hazard, and economic data and compute optimal retreat timing.
+1. **Extract CoSMoS Hazard Data**
+   ```r
+   source("code/processed/extract_cosmos_metrics_unified.R")
+   # Extracts inundation, erosion, and wave data for all case studies
+   ```
 
-Vulnerability Metrics:
-Use code/calc_vulnerability_metrics.R to generate vulnerability and risk metrics for each parcel.
+2. **Process Property Data**
+   ```r
+   source("code/processed/redfin_data_code_ms.R")
+   # Cleans Redfin sales data, estimates rental values, geocodes properties
+   ```
 
-Visualization and Exploration:
-Launch the interactive dashboard with code/comparisons.R to explore results and compare properties.
+3. **Spatial Integration**
+   ```r
+   source("code/processed/interpolate_cosmos.R")
+   # Matches CoSMoS hazards to property parcel locations
+   ```
 
-Reproducibility:
-All major outputs are saved in data/processed/ for traceability and further analysis.
+4. **Run Economic Model**
+   ```r
+   source("code/processed/cosmos_valuation_v3.R")
+   # Calculates NPV of buyout-leaseback scenarios
+   # Determines optimal retreat timing for each property
+   # Outputs: data/[case_study]/derived/valuation_results.csv
+   ```
 
-## Data and Documentation
-Data Sources:
-Redfin property data, NOAA/NDBC wave data, US Census/ACS, Natural Earth, AWS elevation, and California land value datasets.
+5. **Launch Interactive Dashboard**
+   ```r
+   source("code/processed/cosmos_shiny_v2.R")
+   # Explore results, compare properties, test sensitivity
+   ```
 
-Documentation:
-See code/README.md and data/README.md for detailed documentation of scripts and datasets.
+### Key Outputs
+All processed datasets saved to `data/[case_study]/derived/`:
+- Property-level hazard exposure timeseries
+- Economic valuation results with optimal retreat years
+- Vulnerability metrics and risk categorizations
+- NPV calculations for government and property owner perspectives
+
+## Data Sources
+
+- **Property Data**: Redfin residential sales and tax assessor records
+- **Hazard Data**: USGS Coastal Storm Modeling System (CoSMoS) v3.0
+- **Land Values**: Federal Housing Finance Agency (FHFA) House Price Index
+- **Demographics**: US Census Bureau American Community Survey (ACS)
+- **Coastline**: Natural Earth and NOAA coastal datasets
+
+## Key Findings (Preliminary)
+
+Analysis across case studies reveals:
+- Optimal retreat timing varies from 2030s-2080s depending on property characteristics and hazard exposure
+- Buyout-leaseback programs can be economically advantageous for governments when retreat occurs before catastrophic damage
+- High-value properties with low flood risk show later optimal retreat years
+- Cliff erosion drives earlier retreat in communities like Pacifica and Isla Vista
+- Economic outcomes highly sensitive to discount rates and damage assumptions
+
+*Full results pending thesis completion (Spring 2026)*
 
 ## Contributing
-Contributions are welcome!
 
-Please open issues or pull requests for bug reports, feature requests, or improvements.
+Contributions welcome! This is an active research project.
 
-Follow best practices for code style, documentation, and version control.
+- **Bug reports**: Open an issue describing the problem and steps to reproduce
+- **Feature requests**: Describe the proposed enhancement and use case
+- **Code contributions**: Fork the repo, create a feature branch, and submit a pull request
 
-See code/README.md for more on project organization and script structure.
+Please maintain:
+- Clear code comments and documentation
+- Descriptive commit messages
+- Consistency with existing code style
+- Updates to relevant README files
+
+See `code/README.md` for detailed script documentation and best practices.
 
 ## Credits
-Data Managers: William Dean and Wesley Noble
-Base scripts and framework: Jonah Danzinger
-Contributors: Lilia Mourier, Daniel O'Shea, Ada Ekpezu Olumba
-Faculty Advisor: Andrew Plantinga
-External Advisors: Summer Gray, Kim Kimbell
-Sponsors/Clients: California Coastal Commission, Rincon Consultants, Charles Lester (UCSB Ocean and Coastal Policy Center)
+
+**Lead Researcher & Developer**: William Dean (MESM '26, UC Santa Barbara Bren School)
+
+**Project Team**:
+- Wesley Noble - Data management and processing
+- Lilia Mourier - Qualitative case study analysis  
+- Daniel O'Shea - Economic modeling support
+- Ada Ekpezu Olumba - Literature review and policy analysis
+
+**Faculty Advisor**: Dr. Andrew Plantinga (Bren School & Economics Dept.)
+
+**External Advisors**: 
+- Summer Gray (California Coastal Commission)
+- Kim Kimbell (Rincon Consultants)
+- Charles Lester (UCSB Ocean and Coastal Policy Center)
+
+**Technical Foundations**: 
+- Base scripts and framework: Jonah Danzinger (MESM '25)
+
+**Sponsors/Clients**: 
+- California Coastal Commission
+- Rincon Consultants
+- UCSB Ocean and Coastal Policy Center
+
+## Academic Context
+
+This project serves as the Group Project thesis for the Master of Environmental Science and Management (MESM) program at UC Santa Barbara's Bren School of Environmental Science & Management. The work integrates environmental economics, coastal engineering, spatial analysis, and climate adaptation policy.
+
+**Thesis Defense**: Spring 2026
+
 ## License
-- Code: MIT License (see LICENSE)
-- Data/Docs: CC BY 4.0 (see doc/LICENSE-data.txt)
+
+- **Code**: MIT License (see `LICENSE`)
+- **Data & Documentation**: Creative Commons Attribution 4.0 International (CC BY 4.0) (see `doc/LICENSE-data.txt`)
+
+## Citation
+
+If you use this work, please cite:
+
+```
+Dean, W., Noble, W., Mourier, L., O'Shea, D., & Olumba, A.E. (2026). 
+Managed Shores: A Buyout-Leaseback Framework for Coastal Retreat in California. 
+Master's Group Project, Bren School of Environmental Science & Management, 
+UC Santa Barbara.
+```
+
+## Contact
+
+**William Dean**  
+willdean7@bren.ucsb.edu  
+[GitHub](https://github.com/willdean7)
+
+For questions about the project, data access, or collaboration opportunities, please open an issue or contact directly.
+
+---
+
+*Last updated: January 2026*
