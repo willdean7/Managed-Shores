@@ -195,11 +195,11 @@ See `code/README.md` for detailed script documentation and best practices.
 
 **External Advisors**: 
 - Summer Gray (California Coastal Commission)
-- Kim Kimbell (Rincon Consultants)
+- Kim Kimbell
 - Charles Lester (UCSB Ocean and Coastal Policy Center)
 
 **Technical Foundations**: 
-- Base scripts and framework: Jonah Danzinger (MESM '25)
+- Base scripts and framework: Jonah Danzinger
 
 **Sponsors/Clients**: 
 - California Coastal Commission
