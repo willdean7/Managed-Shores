@@ -1,0 +1,52 @@
+=================================================
+MANAGED SHORES - RETREAT SCHEDULE SUMMARY
+Site: ISLA_VISTA 
+Site type: CLIFF-ONLY 
+Generated: 2026-01-12 19:09:31 
+=================================================
+
+CLIFF RETREAT PARAMETERS:
+  Planned retreat threshold: 25 m
+  Immediate safety threshold: 10 m
+  Already exposed properties: Use erosion rate to calculate T* 
+
+BASELINE PARAMETERS:
+  Rental yield: 5 %
+  Discount rate: 2 %
+  Damage threshold: 0.15 m
+  Owner utility: $ 0 /year
+  Cliff scenario: LetItGo 
+
+BASELINE RESULTS:
+  Total properties: 50 
+
+  Retreat triggers:
+     cliff_erosion_ongoing : 89 
+     cliff_immediate_safety : 30 
+     no_retreat_needed : 23 
+     cliff_planned_retreat : 8 
+
+  Cliff exposure status:
+     immediate_hazard : 30 
+     safe : 24 
+     within_retreat_threshold : 96 
+
+  Retreat timing:
+     mid_term : 61 
+     late : 35 
+     immediate : 30 
+     no_retreat : 23 
+     early : 1 
+
+  Retreating properties:
+    Count: 127 
+    Mean year: 35.7 
+    Median year: 39 
+
+  Buyout costs:
+    Total buyout: $ 218.3 M
+    Total market: $ 218.3 M
+    Savings: $ 0 M ( 0 % discount)
+    Mean buyout: $ 1,719 k
+
+=================================================

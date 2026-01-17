@@ -1,0 +1,67 @@
+{
+  "economic_viability": {
+    "total_properties": 186,
+    "n_viable_retreat": 170,
+    "pct_viable_retreat": 91.3978,
+    "n_no_retreat": 16,
+    "pct_no_retreat": 8.6022
+  },
+  "retreat_stats": {
+    "mean_year": 25.7907,
+    "median_year": 21.7205,
+    "sd_year": 21.5138,
+    "min_year": 1,
+    "max_year": 74.787
+  },
+  "timing_breakdown": [
+    {
+      "timing_category": "early",
+      "n": 41,
+      "percent": 22.043,
+      "label": "early: 41 (22%)"
+    },
+    {
+      "timing_category": "immediate",
+      "n": 52,
+      "percent": 27.957,
+      "label": "immediate: 52 (28%)"
+    },
+    {
+      "timing_category": "late",
+      "n": 30,
+      "percent": 16.129,
+      "label": "late: 30 (16.1%)"
+    },
+    {
+      "timing_category": "mid_term",
+      "n": 47,
+      "percent": 25.2688,
+      "label": "mid_term: 47 (25.3%)"
+    },
+    {
+      "timing_category": "no_retreat",
+      "n": 16,
+      "percent": 8.6022,
+      "label": "no_retreat: 16 (8.6%)"
+    }
+  ],
+  "trigger_breakdown": [
+    {
+      "retreat_trigger": "flood_storm_mc",
+      "n": 170,
+      "percent": 91.3978,
+      "label": "flood_storm_mc: 170 (91.4%)"
+    },
+    {
+      "retreat_trigger": "no_retreat",
+      "n": 16,
+      "percent": 8.6022,
+      "label": "no_retreat: 16 (8.6%)"
+    }
+  ],
+  "mc_stats": {
+    "n_properties_mc": 186,
+    "mean_uncertainty_years": 0.7225,
+    "mean_range_years": 2.039
+  }
+}

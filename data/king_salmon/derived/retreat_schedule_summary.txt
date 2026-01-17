@@ -1,0 +1,44 @@
+=================================================
+MANAGED SHORES - RETREAT SCHEDULE SUMMARY
+Site: KING_SALMON 
+Site type: FLOOD-ONLY 
+Generated: 2026-01-17 08:55:08 
+=================================================
+
+CLIFF RETREAT PARAMETERS:
+  Planned retreat threshold: 25 m
+  Immediate safety threshold: 10 m
+  Already exposed properties: Use erosion rate to calculate T* 
+
+BASELINE PARAMETERS:
+  Rental yield: 5 %
+  Discount rate: 2 %
+  Damage threshold: 0.15 m
+  Cliff scenario: LetItGo 
+
+BASELINE RESULTS:
+  Total properties: 62 
+
+  Retreat triggers:
+     flood_storm_mc : 170 
+     no_retreat : 16 
+
+  Retreat timing:
+     immediate : 52 
+     mid_term : 47 
+     early : 41 
+     late : 30 
+     no_retreat : 16 
+
+  Retreating properties:
+    Count: 170 
+    Mean year: 25.8 
+    Median year: 21.7205 
+
+  Buyout costs:
+    Total buyout: $ 45 M
+    Total market: $ 55 M
+    Savings: $ 10 M ( 18.2 % discount)
+    Mean buyout: $ 265 k
+
+=================================================

@@ -1,0 +1,7 @@
+param_category,parameters,min_median_retreat,max_median_retreat,range,max_immediate_pct
+rental_yield,2,58,85,27,0.9
+discount_rate,2,74.5,76.5,2,0
+owner_utility,2,78,79,1,0
+baseline,1,75,75,0,0
+damage_threshold,2,75,75,0,0
+storm_scenario,1,46,46,0,4.4
