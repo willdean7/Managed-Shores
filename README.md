@@ -186,20 +186,20 @@ See `code/README.md` for detailed script documentation and best practices.
 **Lead Researcher & Developer**: William Dean (MESM '26, UC Santa Barbara Bren School)
 
 **Project Team**:
-- Wesley Noble - Data management and processing
-- Lilia Mourier - Qualitative case study analysis  
-- Daniel O'Shea - Economic modeling support
-- Ada Ekpezu Olumba - Literature review and policy analysis
+- Wesley Noble 
+- Lilia Mourier 
+- Daniel O'Shea 
+- Ada Ekpezu Olumba 
 
 **Faculty Advisor**: Dr. Andrew Plantinga (Bren School & Economics Dept.)
 
 **External Advisors**: 
 - Summer Gray (California Coastal Commission)
-- Kim Kimbell (Rincon Consultants)
+- Kim Kimbell
 - Charles Lester (UCSB Ocean and Coastal Policy Center)
 
 **Technical Foundations**: 
-- Base scripts and framework: Jonah Danzinger (MESM '25)
+- Base scripts and framework: Jonah Danzinger
 
 **Sponsors/Clients**: 
 - California Coastal Commission
