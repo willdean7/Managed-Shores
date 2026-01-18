@@ -2,7 +2,7 @@
 CoSMoS Annual Hazards Summary
 ========================================
 Site: isla_vista
-Date: 2026-01-04
+Date: 2026-01-18
 Planning horizon: 80 years
 
 SCENARIOS:
@@ -30,11 +30,11 @@ DATA STRUCTURE:
 
 EXAMPLE (Parcel 1, Intermediate scenario, first 5 years):
 
-  Year 1: SLR=0.047m, cliff_dist=12.4m, 50m=TRUE, 100m=TRUE
-  Year 2: SLR=0.051m, cliff_dist=12.4m, 50m=TRUE, 100m=TRUE
-  Year 3: SLR=0.055m, cliff_dist=12.4m, 50m=TRUE, 100m=TRUE
-  Year 4: SLR=0.059m, cliff_dist=12.4m, 50m=TRUE, 100m=TRUE
-  Year 5: SLR=0.064m, cliff_dist=12.4m, 50m=TRUE, 100m=TRUE
+  Year 1: SLR=0.047m, cliff_dist=15.7m, 50m=TRUE, 100m=TRUE
+  Year 2: SLR=0.051m, cliff_dist=15.7m, 50m=TRUE, 100m=TRUE
+  Year 3: SLR=0.055m, cliff_dist=15.7m, 50m=TRUE, 100m=TRUE
+  Year 4: SLR=0.059m, cliff_dist=15.7m, 50m=TRUE, 100m=TRUE
+  Year 5: SLR=0.064m, cliff_dist=15.7m, 50m=TRUE, 100m=TRUE
 
 NEXT STEPS:
   1. Review this summary for sanity checks

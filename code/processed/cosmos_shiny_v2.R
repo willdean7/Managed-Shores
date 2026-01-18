@@ -29,7 +29,7 @@ library(jsonlite)
 # DATA LOADING
 
 # Configuration
-CASE_NAME <- "king_salmon"  # Change to isla_vista, pacifica as needed
+CASE_NAME <- "isla_vista"  # Change to isla_vista, pacifica as needed
 DATA_DIR <- file.path("data", CASE_NAME)
 DERIVED_DIR <- file.path(DATA_DIR, "derived")
 
@@ -90,6 +90,15 @@ scenarios_raw <- unique(all_results$scenario) %>% na.omit()
 scenario_order <- c("Intermediate", "Intermediate_High", "High")
 scenarios <- scenario_order[scenario_order %in% scenarios_raw]
 
+# Extract cliff scenario options (for cliff-only sites)
+cliff_scenarios_raw <- unique(all_results$cliff_scenario) %>% na.omit()
+cliff_scenarios <- if(length(cliff_scenarios_raw) > 0) {
+  cliff_scenarios_raw
+} else {
+  NULL
+}
+has_cliff_scenarios <- !is.null(cliff_scenarios) && length(cliff_scenarios) > 1
+
 # Check for government economics columns
 has_gov_econ <- all(c("gov_net_cost", "gov_outcome", "gov_rent_collected", "gov_land_recovered") %in% names(baseline_results))
 has_buyout_cap <- "buyout_capped" %in% names(baseline_results)
@@ -129,6 +138,18 @@ ui <- dashboardPage(
       "SLR Scenario:",
       choices = scenarios,
       selected = scenarios[1]  # Default to Intermediate
+    ),
+    
+    # Cliff scenario selector (conditional on site type)
+    conditionalPanel(
+      condition = paste0("'", site_type, "' == 'CLIFF' && ", has_cliff_scenarios),
+      selectInput(
+        "cliff_scenario",
+        "Cliff Management:",
+        choices = if(has_cliff_scenarios) cliff_scenarios else NULL,
+        selected = if(has_cliff_scenarios) cliff_scenarios[1] else NULL
+      ),
+      helpText("LetItGo: Natural erosion | HoldTheLine: Armoring/seawalls")
     ),
     
     hr(),
@@ -185,7 +206,7 @@ ui <- dashboardPage(
     
     tabItems(
       
-
+      
       # TAB 1: GOVERNMENT ECONOMICS
       tabItem(
         tabName = "gov_econ",
@@ -255,7 +276,7 @@ ui <- dashboardPage(
         )
       ),
       
-
+      
       # TAB 2: PROPERTY BUYOUTS
       tabItem(
         tabName = "buyouts",
@@ -303,7 +324,7 @@ ui <- dashboardPage(
         )
       ),
       
-
+      
       # TAB 3: SLR SCENARIO COMPARISON
       tabItem(
         tabName = "scenarios",
@@ -342,7 +363,7 @@ ui <- dashboardPage(
         )
       ),
       
-
+      
       # TAB 4: MONTE CARLO UNCERTAINTY
       tabItem(
         tabName = "mc",
@@ -411,7 +432,7 @@ ui <- dashboardPage(
         )
       ),
       
-
+      
       # TAB 5: SPATIAL MAP
       tabItem(
         tabName = "map",
@@ -512,6 +533,11 @@ server <- function(input, output, session) {
     df <- all_results %>%
       filter(scenario == input$slr_scenario)
     
+    # Filter by cliff scenario if applicable
+    if (site_type == "CLIFF" && has_cliff_scenarios && !is.null(input$cliff_scenario)) {
+      df <- df %>% filter(cliff_scenario == input$cliff_scenario)
+    }
+    
     n_before <- nrow(df)
     
     # Apply parameter filters based on sliders
@@ -535,8 +561,13 @@ server <- function(input, output, session) {
     
     # Debug: print what we filtered to
     if (n_after > 0 && n_after != n_before) {
-      message(sprintf("Filtered from %d to %d rows for scenario=%s, yield=%.0f%%, discount=%.1f%%, threshold=%.0fcm",
-                      n_before, n_after, input$slr_scenario, 
+      cliff_msg <- if(site_type == "CLIFF" && !is.null(input$cliff_scenario)) {
+        paste0(", cliff=", input$cliff_scenario)
+      } else {
+        ""
+      }
+      message(sprintf("Filtered from %d to %d rows for scenario=%s%s, yield=%.0f%%, discount=%.1f%%, threshold=%.0fcm",
+                      n_before, n_after, input$slr_scenario, cliff_msg,
                       input$rental_yield, input$discount_rate, input$damage_threshold))
     }
     
@@ -564,17 +595,30 @@ server <- function(input, output, session) {
   })
   
   # TAB 1: GOVERNMENT ECONOMICS OUTPUTS
-
+  
   output$current_params_display <- renderUI({
     df <- filtered_data()
     n_props <- sum(!is.na(df$buyout_price))
     
+    cliff_display <- if(site_type == "CLIFF" && has_cliff_scenarios && !is.null(input$cliff_scenario)) {
+      paste0("Cliff: ", input$cliff_scenario, " | ")
+    } else {
+      ""
+    }
+    
+    threshold_display <- if(site_type != "CLIFF") {
+      paste0("Threshold: ", input$damage_threshold, "cm | ")
+    } else {
+      ""
+    }
+    
     HTML(paste0(
       "<strong>Current Parameters:</strong> ",
       "SLR: ", input$slr_scenario, " | ",
+      cliff_display,
       "Rental Yield: ", input$rental_yield, "% | ",
       "Discount: ", input$discount_rate, "% | ",
-      "Threshold: ", input$damage_threshold, "cm | ",
+      threshold_display,
       "<span style='color: #2ecc71;'><strong>", n_props, " properties analyzed</strong></span>"
     ))
   })
@@ -1033,37 +1077,86 @@ server <- function(input, output, session) {
     if (!has_gov_econ) {
       plot_ly() %>% layout(title = "Government economics not available")
     } else {
-      scenario_econ <- baseline_results %>%
-        filter(!is.na(buyout_price)) %>%
-        group_by(scenario) %>%
-        summarise(
-          buyout = sum(buyout_price, na.rm = TRUE) / 1e6,
-          rent = sum(gov_rent_collected, na.rm = TRUE) / 1e6,
-          land = sum(gov_land_recovered, na.rm = TRUE) / 1e6,
-          net = sum(gov_net_cost, na.rm = TRUE) / 1e6,
-          .groups = "drop"
+      # For cliff sites with multiple scenarios, group by both SLR and cliff scenario
+      if (site_type == "CLIFF" && has_cliff_scenarios) {
+        scenario_econ <- baseline_results %>%
+          filter(!is.na(buyout_price)) %>%
+          group_by(scenario, cliff_scenario) %>%
+          summarise(
+            buyout = sum(buyout_price, na.rm = TRUE) / 1e6,
+            rent = sum(gov_rent_collected, na.rm = TRUE) / 1e6,
+            land = sum(gov_land_recovered, na.rm = TRUE) / 1e6,
+            net = sum(gov_net_cost, na.rm = TRUE) / 1e6,
+            .groups = "drop"
+          ) %>%
+          mutate(
+            scenario = factor(scenario, levels = c("Intermediate", "Intermediate_High", "High")),
+            x_label = paste0(scenario, "\n", cliff_scenario)
+          ) %>%
+          arrange(scenario, cliff_scenario)
+        
+        # Create ordered x-axis labels
+        expected_order <- expand.grid(
+          scenario = c("Intermediate", "Intermediate_High", "High"),
+          cliff_scenario = sort(unique(scenario_econ$cliff_scenario))  # Alphabetical: HoldTheLine, LetItGo
         ) %>%
-        # Ensure correct ordering
-        mutate(scenario = factor(scenario, levels = c("Intermediate", "Intermediate_High", "High"))) %>%
-        arrange(scenario)
-      
-      plot_ly(scenario_econ, x = ~scenario) %>%
-        add_trace(y = ~buyout, name = "Buyout (cost)", type = "bar",
-                  marker = list(color = "#e74c3c")) %>%
-        add_trace(y = ~rent, name = "Rent (revenue)", type = "bar",
-                  marker = list(color = "#3498db")) %>%
-        add_trace(y = ~land, name = "Land (revenue)", type = "bar",
-                  marker = list(color = "#9b59b6")) %>%
-        add_trace(y = ~-net, name = "Net Profit", type = "scatter", mode = "lines+markers",
-                  line = list(color = "#2ecc71", width = 3),
-                  marker = list(size = 10)) %>%
-        layout(
-          title = "Government Economics by SLR Scenario",
-          xaxis = list(title = "SLR Scenario", categoryorder = "array",
-                       categoryarray = c("Intermediate", "Intermediate_High", "High")),
-          yaxis = list(title = "Amount ($M)"),
-          barmode = "group"
-        )
+          mutate(x_label = paste0(scenario, "\n", cliff_scenario)) %>%
+          arrange(scenario, cliff_scenario) %>%
+          pull(x_label)
+        
+        plot_ly(scenario_econ, x = ~x_label, color = ~cliff_scenario) %>%
+          add_trace(y = ~buyout, name = "Buyout (cost)", type = "bar",
+                    marker = list(color = "#e74c3c")) %>%
+          add_trace(y = ~rent, name = "Rent (revenue)", type = "bar",
+                    marker = list(color = "#3498db")) %>%
+          add_trace(y = ~land, name = "Land (revenue)", type = "bar",
+                    marker = list(color = "#9b59b6")) %>%
+          add_trace(y = ~-net, name = "Net Profit", type = "scatter", mode = "lines+markers",
+                    line = list(color = "#2ecc71", width = 3),
+                    marker = list(size = 10)) %>%
+          layout(
+            title = "Government Economics by Scenario",
+            xaxis = list(
+              title = "SLR Scenario / Cliff Management",
+              categoryorder = "array",
+              categoryarray = expected_order
+            ),
+            yaxis = list(title = "Amount ($M)"),
+            barmode = "group"
+          )
+      } else {
+        # Original logic for non-cliff sites
+        scenario_econ <- baseline_results %>%
+          filter(!is.na(buyout_price)) %>%
+          group_by(scenario) %>%
+          summarise(
+            buyout = sum(buyout_price, na.rm = TRUE) / 1e6,
+            rent = sum(gov_rent_collected, na.rm = TRUE) / 1e6,
+            land = sum(gov_land_recovered, na.rm = TRUE) / 1e6,
+            net = sum(gov_net_cost, na.rm = TRUE) / 1e6,
+            .groups = "drop"
+          ) %>%
+          mutate(scenario = factor(scenario, levels = c("Intermediate", "Intermediate_High", "High"))) %>%
+          arrange(scenario)
+        
+        plot_ly(scenario_econ, x = ~scenario) %>%
+          add_trace(y = ~buyout, name = "Buyout (cost)", type = "bar",
+                    marker = list(color = "#e74c3c")) %>%
+          add_trace(y = ~rent, name = "Rent (revenue)", type = "bar",
+                    marker = list(color = "#3498db")) %>%
+          add_trace(y = ~land, name = "Land (revenue)", type = "bar",
+                    marker = list(color = "#9b59b6")) %>%
+          add_trace(y = ~-net, name = "Net Profit", type = "scatter", mode = "lines+markers",
+                    line = list(color = "#2ecc71", width = 3),
+                    marker = list(size = 10)) %>%
+          layout(
+            title = "Government Economics by SLR Scenario",
+            xaxis = list(title = "SLR Scenario", categoryorder = "array",
+                         categoryarray = c("Intermediate", "Intermediate_High", "High")),
+            yaxis = list(title = "Amount ($M)"),
+            barmode = "group"
+          )
+      }
     }
   })
   
@@ -1409,4 +1502,3 @@ server <- function(input, output, session) {
 
 # RUN APP
 shinyApp(ui, server)
-

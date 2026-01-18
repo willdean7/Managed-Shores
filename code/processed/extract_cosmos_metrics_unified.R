@@ -78,7 +78,7 @@ library(purrr)
 
 
 # CONFIGURATION
-case_name <- "king_salmon"  # Change for other sites
+case_name <- "isla_vista"  # Change for other sites
 data_dir <- file.path("data", case_name)
 cosmos_dir <- file.path(data_dir, "cosmos")
 derived_dir <- file.path(data_dir, "derived")
@@ -251,7 +251,7 @@ message("  OK Loaded ", nrow(parcels), " parcels")
 has_storm_data <- dir.exists(file.path(cosmos_dir, "storm_1yr_depth"))
 
 if (USE_STORM_SCENARIOS && has_storm_data) {
-
+  
   message("EXTRACTING STORM FLOOD SCENARIOS")
   
   # Annual storm
@@ -584,9 +584,50 @@ if (!dir.exists(cliff_dir)) {
               }
               
             } else {
-              message("    WARNING  Could not parse SLR values from Name field")
-              message("    Name field values:")
-              print(head(cliff_data$Name, 5))
+              message("    WARNING  Could not parse SLR values from Name field using SoCal pattern")
+              message("    Trying CenCal format (numeric Name field)...")
+              
+              # Fall back to STRATEGY 3: Try numeric interpretation
+              name_numeric <- suppressWarnings(as.numeric(cliff_data$Name))
+              
+              if (any(!is.na(name_numeric))) {
+                message("    Successfully detected CenCal format (numeric Name field)")
+                
+                slr_cm_values <- unique(name_numeric[!is.na(name_numeric)])
+                slr_m_values <- slr_cm_values / 100
+                
+                message("    Found SLR scenarios (cm): ", paste(sort(slr_cm_values), collapse = ", "))
+                
+                # Extract for each SLR scenario
+                for (i in seq_along(slr_cm_values)) {
+                  slr_cm <- slr_cm_values[i]
+                  slr_m <- slr_m_values[i]
+                  
+                  cliff_subset <- cliff_data %>% 
+                    filter(!is.na(suppressWarnings(as.numeric(Name)))) %>%
+                    filter(suppressWarnings(as.numeric(Name)) == slr_cm)
+                  
+                  if (nrow(cliff_subset) > 0) {
+                    parcels_proj <- st_transform(parcels, st_crs(cliff_subset))
+                    distances <- st_distance(parcels_proj, cliff_subset)
+                    min_dist_m <- as.numeric(apply(distances, 1, min))
+                    
+                    cliff_list[[length(cliff_list) + 1]] <- tibble(
+                      parcel_id = parcels$parcel_id,
+                      slr_m = slr_m,
+                      cliff_dist_m = min_dist_m,
+                      scenario = scenario_name
+                    )
+                    
+                    message("      ✓ SLR = ", slr_m, " m: ", 
+                            sum(min_dist_m < 100), " parcels within 100m")
+                  }
+                }
+              } else {
+                message("    ERROR  Could not parse Name field as numeric either")
+                message("    Name field values:")
+                print(head(cliff_data$Name, 5))
+              }
             }
             
             
@@ -643,48 +684,6 @@ if (!dir.exists(cliff_dir)) {
               }
             }
             
-            # ====================================================================
-            # STRATEGY 3: CenCal format - numeric Name field
-            # ====================================================================
-          } else if ("Name" %in% names(cliff_data)) {
-            
-            # Try interpreting Name as numeric (CenCal uses cm values like 0, 25, 50, 100)
-            name_numeric <- suppressWarnings(as.numeric(cliff_data$Name))
-            
-            if (any(!is.na(name_numeric))) {
-              message("    Detected CenCal format (numeric Name field)")
-              
-              slr_cm_values <- unique(name_numeric[!is.na(name_numeric)])
-              slr_m_values <- slr_cm_values / 100
-              
-              message("    Found SLR scenarios (cm): ", paste(sort(slr_cm_values), collapse = ", "))
-              
-              # Extract for each SLR scenario
-              for (i in seq_along(slr_cm_values)) {
-                slr_cm <- slr_cm_values[i]
-                slr_m <- slr_m_values[i]
-                
-                cliff_subset <- cliff_data %>% 
-                  filter(!is.na(suppressWarnings(as.numeric(Name)))) %>%
-                  filter(suppressWarnings(as.numeric(Name)) == slr_cm)
-                
-                if (nrow(cliff_subset) > 0) {
-                  parcels_proj <- st_transform(parcels, st_crs(cliff_subset))
-                  distances <- st_distance(parcels_proj, cliff_subset)
-                  min_dist_m <- as.numeric(apply(distances, 1, min))
-                  
-                  cliff_list[[length(cliff_list) + 1]] <- tibble(
-                    parcel_id = parcels$parcel_id,
-                    slr_m = slr_m,
-                    cliff_dist_m = min_dist_m,
-                    scenario = scenario_name
-                  )
-                  
-                  message("      ✓ SLR = ", slr_m, " m: ", 
-                          sum(min_dist_m < 100), " parcels within 100m")
-                }
-              }
-            }
           } else {
             message("    WARNING  Cannot identify SLR encoding format")
             message("    Available fields: ", paste(names(cliff_data), collapse = ", "))
@@ -834,3 +833,4 @@ if ("scenario" %in% names(final_output)) {
 
 message("EXTRACTION COMPLETE!")
 message("Next step: Run interpolate_cosmos.R to create annual timelines\n")
+

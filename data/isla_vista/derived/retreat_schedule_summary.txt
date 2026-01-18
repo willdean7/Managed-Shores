@@ -2,7 +2,7 @@
 MANAGED SHORES - RETREAT SCHEDULE SUMMARY
 Site: ISLA_VISTA 
 Site type: CLIFF-ONLY 
-Generated: 2026-01-12 19:09:31 
+Generated: 2026-01-18 12:16:16 
 =================================================
 
 CLIFF RETREAT PARAMETERS:
@@ -14,7 +14,6 @@ BASELINE PARAMETERS:
   Rental yield: 5 %
   Discount rate: 2 %
   Damage threshold: 0.15 m
-  Owner utility: $ 0 /year
   Cliff scenario: LetItGo 
 
 BASELINE RESULTS:
@@ -44,9 +43,9 @@ BASELINE RESULTS:
     Median year: 39 
 
   Buyout costs:
-    Total buyout: $ 218.3 M
+    Total buyout: $ 192.6 M
     Total market: $ 218.3 M
-    Savings: $ 0 M ( 0 % discount)
-    Mean buyout: $ 1,719 k
+    Savings: $ 25.6 M ( 11.8 % discount)
+    Mean buyout: $ 1,517 k
 
 =================================================

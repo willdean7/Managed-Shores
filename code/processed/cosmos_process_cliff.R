@@ -23,7 +23,7 @@ case_abbr <- "pac"      # Short abbreviation for filenames
 
 # Define which region's data to use (determines file format)
 # Options: "CenCal" (uses KMZ), "SoCal" (uses shapefiles)
-data_region <- "SoCal"  # Change to "SoCal" for Southern California sites
+data_region <- "CenCal"  # Change to "SoCal" for Southern California sites
 
 # AOI bbox (4326) — set per case
 bbox_lookup <- list(
@@ -50,7 +50,8 @@ clip_vector_to_bbox <- function(v, bbox_poly_4326) {
 
 # SOURCE ROOTS FOR CLIFF DATA - vary by region
 if (data_region == "CenCal") {
-  cliff_base <- file.path(external_base, "CoastalCliff_projections_CenCal_CoSMoS_3.1")
+  # CORRECTED: Match your actual folder name from screenshot
+  cliff_base <- file.path(external_base, "CoSMoS_cliff_retreat_projections_CenCal")
 } else if (data_region == "SoCal") {
   cliff_base <- file.path(external_base, "CoSMoS_cliff_retreat_projections_SoCal")
 } else {
