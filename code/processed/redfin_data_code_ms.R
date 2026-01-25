@@ -39,7 +39,7 @@ library(mgcv)
 
 # CONFIGURATION - EDIT THIS SECTION FOR EACH CASE STUDY
 # Study area configuration
-CASE_NAME <- "king_salmon"  # Change to study area: carpinteria, pacifica, stinson, isla_vista, etc.
+CASE_NAME <- "stinson"  # Change to study area: carpinteria, pacifica, stinson, isla_vista, etc.
 DATA_DIR <- here("data", CASE_NAME)
 dir.create(DATA_DIR, recursive = TRUE, showWarnings = FALSE)
 
@@ -80,7 +80,7 @@ dir.create(DATA_DIR, recursive = TRUE, showWarnings = FALSE)
 #      sea level rise vulnerability on U.S. West Coast—critical for managed 
 #      retreat analysis.
 
-PRICE_THRESHOLD <- 270000  # ← UPDATE THIS for each case study location
+PRICE_THRESHOLD <- 3300000  # ← UPDATE THIS for each case study location
 
 # Validation flags
 RUN_CROSS_VALIDATION <- TRUE  # Set FALSE for faster runs (but less validation)
@@ -158,7 +158,7 @@ message("  These will be updated with current Redfin estimates\n")
 # Quality check
 if (pct_flagged > 50) {
   warning("     WARNING: ", pct_flagged, "% of properties flagged!")
-  warning("     This is unusually high - consider raising PRICE_THRESHOLD")
+  warning("     This is unusually high - consider lowering PRICE_THRESHOLD")
   warning("     Current threshold: $", format(PRICE_THRESHOLD, big.mark = ","))
   warning("     Suggested: Check median price for ", CASE_NAME, " and set threshold to ~60% of median\n")
 } else if (pct_flagged < 5) {
@@ -169,7 +169,7 @@ if (pct_flagged > 50) {
 # Initialize column to store scraped estimates
 redfin_df$assessed_or_estimate <- NA_real_
 
-# Scraper function (unchanged - works well)
+# Scraper function - Updated Jan 2026 for new Redfin page structure
 get_redfin_estimate <- function(url) {
   page <- tryCatch({
     GET(url, add_headers(
@@ -194,12 +194,21 @@ get_redfin_estimate <- function(url) {
   # Extract full text of the page
   full_text <- html_text2(html)
   
-  # Find a pattern where a dollar value is followed closely by "Redfin Estimate"
-  pattern <- "\\$[\\d,]+(?=\\s*Redfin Estimate)"
-  match <- str_extract(full_text, pattern)
+  # NEW PATTERN (Jan 2026): Look for large dollar amount followed by "Est. refi payment"
+  # Example from page: "$3,131,882 Est. refi payment $3,613/mo"
+  pattern1 <- "\\$([\\d,]+)\\s+Est\\.\\s+refi\\s+payment"
+  match1 <- str_match(full_text, pattern1)
   
-  if (!is.na(match)) {
-    return(as.numeric(gsub("[\\$,]", "", match)))
+  if (!is.na(match1[1, 2])) {
+    return(as.numeric(gsub(",", "", match1[1, 2])))
+  }
+  
+  # FALLBACK: Try old pattern in case they revert or for archived pages
+  pattern2 <- "\\$[\\d,]+(?=\\s*Redfin Estimate)"
+  match2 <- str_extract(full_text, pattern2)
+  
+  if (!is.na(match2)) {
+    return(as.numeric(gsub("[\\$,]", "", match2)))
   }
   
   return(NA_real_)
@@ -404,7 +413,7 @@ message("→ Assigning hazard type based on case study site...\n")
 
 SITE_HAZARD_TYPES <- list(
   carpinteria   = "flood",  # Low-lying beachfront community
-  stinson_beach = "flood",  # Sandy beach, lagoon setting
+  stinson = "flood",  # Sandy beach, lagoon setting
   king_salmon   = "flood",  # Low coastal plain
   isla_vista    = "bluff",  # Mesa blufftop setting
   pacifica      = "bluff"   # Coastal bluffs and terraces

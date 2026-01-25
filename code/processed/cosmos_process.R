@@ -5,6 +5,7 @@
 # OPTIMIZATION: Only processes SLR levels needed for OPC 2024 interpolation
 #
 # For each storm scenario, processes flood depth and duration across strategic SLR levels
+# UPDATED: Includes special handling for Marin County's flat file structure
 
 rm(list = ls())
 library(sf)
@@ -21,8 +22,8 @@ project_base  <- "~/Documents/Managed_Shores"
 crs_work      <- 3310  # CA Albers (meters)
 
 # Case study selection
-case_name <- "king_salmon"  # Options: carpinteria, king_salmon, silver_strand, isla_vista, pacifica
-case_abbr <- "ks"         # "carp", "ks", "ss", "iv", "pac"
+case_name <- "marin"  # Options: carpinteria, king_salmon, silver_strand, isla_vista, pacifica, marin
+case_abbr <- "marin"         # "carp", "ks", "ss", "iv", "pac", "marin"
 
 # AOI bounding boxes (WGS84)
 bbox_lookup <- list(
@@ -30,7 +31,8 @@ bbox_lookup <- list(
   king_salmon   = c(xmin = -124.22463, ymin = 40.73482, xmax = -124.21277, ymax = 40.74378),
   silver_strand = c(xmin = -119.23, ymin = 34.14, xmax = -119.21, ymax = 34.16),
   isla_vista    = c(xmin = -119.88, ymin = 34.40, xmax = -119.84, ymax = 34.42),
-  pacifica      = c(xmin = -122.52, ymin = 37.60, xmax = -122.48, ymax = 37.65)
+  pacifica      = c(xmin = -122.52, ymin = 37.60, xmax = -122.48, ymax = 37.65),
+  marin         = c(xmin = -122.68, ymin = 37.88, xmax = -122.62, ymax = 37.92)
 )
 
 bbox4326 <- st_bbox(bbox_lookup[[case_name]], crs = st_crs(4326))
@@ -220,23 +222,135 @@ process_storm_metric <- function(base_dir, out_dir, metric_name) {
   invisible(NULL)
 }
 
+# MARIN-SPECIFIC PROCESSING FUNCTION
+# Special handling for Marin County's flat file structure (files directly in flood_depth/flood_duration folders)
+
+process_marin_flat_structure <- function(metric_dir, out_dir, metric_name) {
+  
+  if (!dir.exists(metric_dir)) {
+    warning("Directory not found: ", metric_dir)
+    return(invisible(NULL))
+  }
+  
+  # Get all TIF files directly from the directory
+  tif_files <- list.files(metric_dir, pattern = "\\.tif$", full.names = TRUE)
+  
+  if (!length(tif_files)) {
+    message("  ⚠ No .tif files found in: ", metric_dir)
+    return(invisible(NULL))
+  }
+  
+  message("  → Found ", length(tif_files), " total .tif files")
+  
+  # Extract SLR levels from filenames
+  slr_levels <- tolower(str_extract(basename(tif_files), "slr\\d{3}"))
+  unique_slrs <- unique(slr_levels)
+  
+  # Filter to only desired SLR levels
+  unique_slrs <- unique_slrs[unique_slrs %in% SLR_LEVELS_TO_PROCESS]
+  unique_slrs <- sort(unique_slrs)
+  
+  message("  → Processing ", length(unique_slrs), " SLR levels (filtered)")
+  message("  → Levels: ", paste(unique_slrs, collapse = ", "))
+  
+  for (slr in unique_slrs) {
+    message("\n  Processing SLR level: ", slr)
+    
+    # Get all files for this SLR level
+    slr_files <- tif_files[grepl(slr, basename(tif_files), ignore.case = TRUE)]
+    
+    if (!length(slr_files)) {
+      message("    ⚠ No files found for ", slr)
+      next
+    }
+    
+    message("    → Found ", length(slr_files), " file(s)")
+    
+    # Process and save
+    out_stub <- paste0(metric_name, "_", slr, "_w001_", case_abbr)
+    
+    # Read and process rasters
+    rs <- list()
+    for (f in slr_files) {
+      tryCatch({
+        r <- terra::rast(f)
+        
+        # CRITICAL: Convert to float and divide by 100 to get meters
+        r <- r / 100.0
+        
+        # Set values < 0.01 (1 cm) to NA
+        r[r < 0.01] <- NA
+        
+        # Project to working CRS
+        r_proj <- terra::project(r, paste0("EPSG:", crs_work), method = "bilinear")
+        
+        if (!is.null(r_proj) && inherits(r_proj, "SpatRaster")) {
+          rs[[length(rs) + 1]] <- r_proj
+        }
+      }, error = function(e) {
+        warning("    Error reading ", basename(f), ": ", e$message)
+      })
+    }
+    
+    if (length(rs) == 0) {
+      message("    ⚠ No valid rasters after projection")
+      next
+    }
+    
+    # Merge if multiple files (shouldn't be necessary for Marin, but good to have)
+    message("    → Mosaicking ", length(rs), " raster(s)...")
+    merged <- if (length(rs) == 1) {
+      rs[[1]]
+    } else {
+      # Align all rasters to first one
+      template <- rs[[1]]
+      rs_aligned <- lapply(rs, function(r) {
+        if (!terra::compareGeom(r, template, stopOnError = FALSE)) {
+          terra::resample(r, template, method = "bilinear")
+        } else {
+          r
+        }
+      })
+      src <- terra::sprc(rs_aligned)
+      terra::mosaic(src, fun = max)
+    }
+    
+    # Crop to AOI
+    message("    → Cropping to AOI...")
+    cropped <- crop_raster_to_bbox(merged, bbox_poly4326_expanded)
+    
+    # Save
+    dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
+    out_path <- file.path(out_dir, paste0(out_stub, ".tif"))
+    
+    terra::writeRaster(cropped, out_path, overwrite = TRUE,
+                       filetype = "GTiff", 
+                       datatype = "FLT4S",
+                       gdal = c("COMPRESS=LZW", "TILED=YES", "BIGTIFF=IF_SAFER"))
+    
+    message("    ✓ Saved: ", basename(out_path))
+  }
+  
+  invisible(NULL)
+}
+
 # STORM SCENARIO PROCESSING
-# change the folder names for each case study
+#### Change the folder names for each case study !!!!!
 
 storm_configs <- list(
   annual = list(
     name = "1-year storm (annual)",
-    folder = "CoSMoS_1yr_storm_flood_depth_and_duration_king_salmon",
+    folder = "CoSMoS_1yr_storm_flood_depth_and_duration_marin",
     abbrev = "1yr"
   ),
   storm_20yr = list(
     name = "20-year storm",
-    folder = "CoSMoS_20yr_storm_flood_depth_and_duration_king_salmon",
+    folder = "CoSMoS_20yr_storm_flood_depth_and_duration_marin",
     abbrev = "20yr"
   ),
   storm_100yr = list(
     name = "100-year storm",
-    folder = "CoSMoS_100yr_storm_flood_depth_and_duration_king_salmon",
+    folder = "CoSMoS_100yr_storm_flood_depth_and_duration_marin",
     abbrev = "100yr"
   )
 )
@@ -246,9 +360,7 @@ for (storm_type in names(storm_configs)) {
   
   config <- storm_configs[[storm_type]]
   
-  message("\n========================================")
   message("PROCESSING: ", toupper(config$name))
-  message("========================================\n")
   
   storm_base <- file.path(external_base, config$folder)
   
@@ -262,13 +374,26 @@ for (storm_type in names(storm_configs)) {
   message("Processing flood depth...")
   depth_base <- file.path(storm_base, "flood_depth")
   depth_out  <- file.path(local_output, paste0("storm_", config$abbrev, "_depth"))
-  process_storm_metric(depth_base, depth_out, "flood_depth")
+  
+  # Use Marin-specific function if processing Marin county
+  if (case_name == "marin") {
+    process_marin_flat_structure(depth_base, depth_out, "flood_depth")
+  } else {
+    process_storm_metric(depth_base, depth_out, "flood_depth")
+  }
   
   # --- FLOOD DURATION ---
   message("\nProcessing flood duration...")
   duration_base <- file.path(storm_base, "flood_duration")
   duration_out  <- file.path(local_output, paste0("storm_", config$abbrev, "_duration"))
-  process_storm_metric(duration_base, duration_out, "flood_duration")
+  
+  # Note: Duration files are shapefiles for Marin, not TIFs
+  if (case_name == "marin") {
+    message("  ⚠ Duration data is in shapefile format for Marin - skipping raster processing")
+    message("  → If you need duration data, you'll need to rasterize the shapefiles separately")
+  } else {
+    process_storm_metric(duration_base, duration_out, "flood_duration")
+  }
   
   message("\n✓ Completed: ", config$name, "\n")
 }

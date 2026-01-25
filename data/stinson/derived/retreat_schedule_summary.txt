@@ -1,0 +1,44 @@
+=================================================
+MANAGED SHORES - RETREAT SCHEDULE SUMMARY
+Site: STINSON 
+Site type: FLOOD-ONLY 
+Generated: 2026-01-24 20:38:29 
+=================================================
+
+CLIFF RETREAT PARAMETERS:
+  Planned retreat threshold: 25 m
+  Immediate safety threshold: 10 m
+  Already exposed properties: Use erosion rate to calculate T* 
+
+BASELINE PARAMETERS:
+  Rental yield: 5 %
+  Discount rate: 2 %
+  Damage threshold: 0.15 m
+  Cliff scenario: LetItGo 
+
+BASELINE RESULTS:
+  Total properties: 405 
+
+  Retreat triggers:
+     beyond_horizon : 618 
+     flood_storm_mc : 597 
+
+  Retreat timing:
+     beyond_horizon : 618 
+     late : 187 
+     immediate : 164 
+     mid_term : 133 
+     early : 113 
+
+  Retreating properties:
+    Count: 597 
+    Mean year: 32.4 
+    Median year: 28.507 
+
+  Buyout costs:
+    Total buyout: $ 1,744.1 M
+    Total market: $ 1,918.4 M
+    Savings: $ 174.3 M ( 9.1 % discount)
+    Mean buyout: $ 2,922 k
+
+=================================================

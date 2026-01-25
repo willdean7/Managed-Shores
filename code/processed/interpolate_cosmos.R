@@ -2,6 +2,12 @@
 # Purpose: Convert CoSMoS static SLR scenarios to annual hazard timelines using OPC 2024 projections
 # Author: Will Dean
 #
+# IMPORTANT TIMELINE NOTE:
+#   OPC 2024 report baseline = Year 2020
+#   Current analysis year = 2026 (6 years after OPC baseline)
+#   This script starts projections at OPC Year 6 to represent present day (2026)
+#   Planning horizon: 2026-2100 (74 years from present, stays within OPC data range)
+#
 # Input:
 #   - data/{site}/derived/cosmos_hazard_metrics.csv (from extract_cosmos_metrics_unified.R)
 #   - OPC 2024 SLR scenarios (Intermediate, Intermediate-High, High)
@@ -11,9 +17,9 @@
 #   - data/{site}/derived/cosmos_annual_hazards_summary.txt
 #
 # What this does:
-#   Takes hazard metrics at discrete SLR levels (e.g., 0, 0.5, 1.0, 1.5, 2.0, 5.0m)
-#   and interpolates them to create smooth annual timelines for years 1-100
-#   using OPC sea level rise projections.
+#   Takes hazard metrics at discrete SLR levels (e.g., 0, 0.25, 0.5, 1.0, 1.5, 2.0m)
+#   and interpolates them to create smooth annual timelines for years 0-80
+#   using OPC sea level rise projections, starting from Year 6 in OPC timeline (2026).
 
 rm(list = ls())
 library(dplyr)
@@ -24,15 +30,26 @@ library(stringr)
 
 
 # CONFIGURATION
-case_name <- "isla_vista"  # Change for other sites
+case_name <- "stinson"  # Change for other sites
 data_dir <- file.path("data", case_name)
 derived_dir <- file.path(data_dir, "derived")
 
-bigT <- 80  # Planning horizon (years from present, 80 to match OPC 2024 data)
+# Planning horizon
+bigT <- 74  # Years from present (2026-2100, stays within OPC data range)
+
+# OPC timeline adjustment
+# OPC 2024 baseline = Year 2020
+# Current year = 2026
+# Years since OPC baseline = 6
+OPC_BASELINE_YEAR <- 2020
+CURRENT_YEAR <- 2026
+YEARS_SINCE_OPC_BASELINE <- CURRENT_YEAR - OPC_BASELINE_YEAR
 
 
 message("CoSMoS Temporal Interpolation: ", toupper(case_name))
-message("Converting SLR levels → annual timelines (years 1-", bigT, ")")
+message("Timeline: 2026-2100 (", bigT, " years)")
+message("OPC 2024 baseline: ", OPC_BASELINE_YEAR, " (", YEARS_SINCE_OPC_BASELINE, " years ago)")
+message("Starting projections at OPC Year ", YEARS_SINCE_OPC_BASELINE, " (present day)")
 
 
 # LOAD HAZARD METRICS
@@ -41,7 +58,7 @@ stopifnot(file.exists(hazards_path))
 
 hazards <- read_csv(hazards_path, show_col_types = FALSE)
 
-message("✓ Loaded hazard metrics: ", nrow(hazards), " rows (parcel × SLR combinations)")
+message("\n✓ Loaded hazard metrics: ", nrow(hazards), " rows (parcel × SLR combinations)")
 message("  - Parcels: ", n_distinct(hazards$parcel_id))
 message("  - SLR levels: ", paste(sort(unique(hazards$slr_m)), collapse = ", "), " m\n")
 
@@ -49,9 +66,11 @@ message("  - SLR levels: ", paste(sort(unique(hazards$slr_m)), collapse = ", "),
 # OPC 2024 SLR SCENARIOS
 
 # OPC 2024 sea level rise projections (in feet, converted to meters)
+# These are relative to OPC's 2020 baseline
 ft_to_m <- 0.3048
 
 # Decadal data points from OPC 2024 report
+# Time 0 = Year 2020
 sea_level_data <- list(
   "Intermediate" = data.frame(
     time = c(0, 10, 20, 30, 40, 50, 60, 70, 80),
@@ -69,25 +88,33 @@ sea_level_data <- list(
 
 # Fit quadratic models to get smooth annual SLR(t) curves
 # We use quadratic because SLR accelerates over time
-fit_slr_model <- function(df, years = 1:bigT) {
+# Start at OPC Year 6 (2026) and project forward 74 years
+fit_slr_model <- function(df, start_year = YEARS_SINCE_OPC_BASELINE, n_years = bigT) {
   df$timesquared <- df$time^2
   m <- lm(sea_level_rise ~ time + timesquared, data = df)
-  nd <- data.frame(time = years, timesquared = years^2)
+  
+  # Predict from OPC Year 6 through Year 6+80
+  years_opc <- start_year:(start_year + n_years)
+  nd <- data.frame(time = years_opc, timesquared = years_opc^2)
   slr_vec <- as.numeric(predict(m, newdata = nd))
+  
   # Ensure monotonic increase (no backtracking due to extrapolation)
   slr_vec <- cummax(slr_vec)
+  
   slr_vec
 }
 
 # Create smooth annual SLR vectors for each scenario
-slr_scenarios <- lapply(sea_level_data, function(df) fit_slr_model(df, years = 1:bigT))
+# These represent Years 0-74 from present (2026-2100)
+# But are calculated from OPC Years 6-80 (2026-2100)
+slr_scenarios <- lapply(sea_level_data, function(df) fit_slr_model(df))
 
 # Preview
-message("OPC 2024 SLR Scenarios (annual interpolation):")
+message("OPC 2024 SLR Scenarios (starting from present day = 2026):")
 for (scen in names(slr_scenarios)) {
   slr_vec <- slr_scenarios[[scen]]
-  message(sprintf("  %s: Year 1 = %.2fm, Year 50 = %.2fm, Year %d = %.2fm", 
-                  scen, slr_vec[1], slr_vec[50], bigT, slr_vec[bigT]))
+  message(sprintf("  %s: Year 0 (2026) = %.3fm, Year 40 (2066) = %.2fm, Year %d (%d) = %.2fm", 
+                  scen, slr_vec[1], slr_vec[41], bigT, CURRENT_YEAR + bigT, slr_vec[bigT + 1]))
 }
 
 # INTERPOLATION FUNCTIONS
@@ -95,9 +122,9 @@ for (scen in names(slr_scenarios)) {
 # For a single parcel, interpolate hazard metrics at each year's SLR level
 interpolate_annual_hazards <- function(parcel_hazards, slr_annual_vec, parcel_num) {
   # parcel_hazards: df with columns slr_m, depth_m, duration_hr, etc. for ONE parcel
-  # slr_annual_vec: vector of SLR(t) for years 1:100
+  # slr_annual_vec: vector of SLR(t) for years 0:bigT (present through planning horizon)
   
-  years <- 1:length(slr_annual_vec)
+  years <- 0:bigT  # Changed from 1:length() to 0:bigT for clarity
   results <- tibble(year = years, slr_m = slr_annual_vec)
   
   # Metrics to interpolate (average conditions only)
@@ -166,7 +193,7 @@ interpolate_annual_hazards <- function(parcel_hazards, slr_annual_vec, parcel_nu
 
 
 # RUN INTERPOLATION FOR ALL PARCELS × SCENARIOS
-message("→ Interpolating hazard timelines for all parcels × scenarios...")
+message("\n→ Interpolating hazard timelines for all parcels × scenarios...")
 message("  This will take a minute...\n")
 
 annual_hazards_list <- list()
@@ -230,7 +257,8 @@ if ("cliff_scenario" %in% names(annual_hazards)) {
   message("  - Cliff management scenarios: ", paste(unique(annual_hazards$cliff_scenario), collapse = ", "))
 }
 
-message("  - Years: ", min(annual_hazards$year), "-", max(annual_hazards$year), "\n")
+message("  - Years: ", min(annual_hazards$year), "-", max(annual_hazards$year), 
+        " (", CURRENT_YEAR, "-", CURRENT_YEAR + bigT, ")\n")
 
 # ADD FLOODING FLAG BASED ON THRESHOLD
 # Only apply if depth_m column exists (flood sites)
@@ -269,7 +297,8 @@ summary_lines <- c(
   "========================================",
   paste("Site:", case_name),
   paste("Date:", Sys.Date()),
-  paste("Planning horizon:", bigT, "years"),
+  paste("Timeline: ", CURRENT_YEAR, "-", CURRENT_YEAR + bigT, " (", bigT, " years from present)", sep = ""),
+  paste("OPC 2024 baseline: ", OPC_BASELINE_YEAR, " (started ", YEARS_SINCE_OPC_BASELINE, " years ago)", sep = ""),
   "",
   "SCENARIOS:",
   paste("  ", names(slr_scenarios)),
@@ -309,7 +338,7 @@ if (has_flood_data) {
   # First year of flooding for each parcel × scenario
   first_flood <- annual_hazards %>%
     filter(flooded) %>%
-    group_by(parcel_id, slr_scenario) %>%
+    group_by(parcel_id, scenario) %>%
     summarise(first_flood_year = min(year, na.rm = TRUE), .groups = "drop")
   
   first_flood_summary <- first_flood %>%
@@ -331,12 +360,17 @@ if (has_flood_data) {
   
   for (i in 1:nrow(first_flood_summary)) {
     s <- first_flood_summary[i, ]
+    calendar_median <- CURRENT_YEAR + s$median_first_flood
+    calendar_min <- CURRENT_YEAR + s$min_first_flood
+    calendar_max <- CURRENT_YEAR + s$max_first_flood
+    
     summary_lines <- c(
       summary_lines,
       paste0("  ", s$scenario, ":"),
       paste0("    Parcels that flood: ", s$parcels_flood),
-      paste0("    Median first flood year: ", round(s$median_first_flood)),
-      paste0("    Range: year ", s$min_first_flood, " to ", s$max_first_flood),
+      paste0("    Median first flood: Year ", round(s$median_first_flood), " (", calendar_median, ")"),
+      paste0("    Range: Year ", s$min_first_flood, " (", calendar_min, ") to Year ", 
+             s$max_first_flood, " (", calendar_max, ")"),
       ""
     )
   }
@@ -356,13 +390,19 @@ if ("cliff_dist_m" %in% names(annual_hazards)) {
     scen_data <- annual_hazards %>% filter(scenario == slr_scen)
     
     # Count properties in danger zones at different time points
-    year_80 <- scen_data %>% filter(year == bigT)
+    year_0 <- scen_data %>% filter(year == 0)  # Present day
+    year_40 <- scen_data %>% filter(year == 40)  # Mid-century
+    year_80 <- scen_data %>% filter(year == bigT)  # End of planning horizon
     
     summary_lines <- c(
       summary_lines,
-      paste0("  ", slr_scen, " (Year ", bigT, "):"),
-      paste0("    Parcels within 50m: ", sum(year_80$cliff_dist_m < 50, na.rm = TRUE)),
-      paste0("    Parcels within 100m: ", sum(year_80$cliff_dist_m < 100, na.rm = TRUE)),
+      paste0("  ", slr_scen, ":"),
+      paste0("    Present day (", CURRENT_YEAR, "): ", 
+             sum(year_0$cliff_dist_m < 50, na.rm = TRUE), " parcels within 50m"),
+      paste0("    Year 40 (", CURRENT_YEAR + 40, "): ",
+             sum(year_40$cliff_dist_m < 50, na.rm = TRUE), " parcels within 50m"),
+      paste0("    Year ", bigT, " (", CURRENT_YEAR + bigT, "): ",
+             sum(year_80$cliff_dist_m < 50, na.rm = TRUE), " parcels within 50m"),
       ""
     )
   }
@@ -373,7 +413,7 @@ summary_lines <- c(
   "DATA STRUCTURE:",
   paste("  Columns:", paste(names(annual_hazards), collapse = ", ")),
   "",
-  "EXAMPLE (Parcel 1, Intermediate scenario, first 5 years):",
+  paste0("EXAMPLE (Parcel 1, Intermediate scenario, first 5 years from ", CURRENT_YEAR, "):"),
   ""
 )
 
@@ -381,21 +421,22 @@ summary_lines <- c(
 if ("depth_m" %in% names(annual_hazards)) {
   # Flood site example
   example <- annual_hazards %>%
-    filter(parcel_id == 1, scenario == "Intermediate", year <= 5) %>%
+    filter(parcel_id == 1, scenario == "Intermediate", year <= 4) %>%
     select(year, slr_m, depth_m, flooded)
   
   for (i in 1:nrow(example)) {
     row <- example[i, ]
+    calendar_year <- CURRENT_YEAR + row$year
     summary_lines <- c(
       summary_lines,
-      sprintf("  Year %d: SLR=%.3fm, depth=%.2fm, flooded=%s",
-              row$year, row$slr_m, row$depth_m, row$flooded)
+      sprintf("  Year %d (%d): SLR=%.3fm, depth=%.2fm, flooded=%s",
+              row$year, calendar_year, row$slr_m, row$depth_m, row$flooded)
     )
   }
 } else if ("cliff_dist_m" %in% names(annual_hazards)) {
   # Cliff site example
   example <- annual_hazards %>%
-    filter(parcel_id == 1, scenario == "Intermediate", year <= 5)
+    filter(parcel_id == 1, scenario == "Intermediate", year <= 4)
   
   if ("cliff_scenario" %in% names(example)) {
     example <- example %>% filter(cliff_scenario == unique(cliff_scenario)[1])
@@ -405,12 +446,13 @@ if ("depth_m" %in% names(annual_hazards)) {
   
   for (i in 1:nrow(example)) {
     row <- example[i, ]
+    calendar_year <- CURRENT_YEAR + row$year
     in_50m <- row$cliff_dist_m < 50
     in_100m <- row$cliff_dist_m < 100
     summary_lines <- c(
       summary_lines,
-      sprintf("  Year %d: SLR=%.3fm, cliff_dist=%.1fm, 50m=%s, 100m=%s",
-              row$year, row$slr_m, row$cliff_dist_m, in_50m, in_100m)
+      sprintf("  Year %d (%d): SLR=%.3fm, cliff_dist=%.1fm, <50m=%s, <100m=%s",
+              row$year, calendar_year, row$slr_m, row$cliff_dist_m, in_50m, in_100m)
     )
   }
 }
@@ -420,7 +462,7 @@ summary_lines <- c(
   "",
   "NEXT STEPS:",
   "  1. Review this summary for sanity checks",
-  "  2. Run calculate_retreat_years.R to compute optimal retreat timing",
+  "  2. Run cosmos_valuation_v3.R to compute optimal retreat timing",
   "  3. Analyze retreat schedule by scenario",
   "========================================"
 )
@@ -431,4 +473,3 @@ writeLines(summary_lines, summary_file)
 cat("\n")
 cat(paste(summary_lines, collapse = "\n"))
 cat("\n\n")
-

@@ -1,0 +1,67 @@
+{
+  "economic_viability": {
+    "total_properties": 1215,
+    "n_viable_retreat": 597,
+    "pct_viable_retreat": 49.1358,
+    "n_beyond_horizon": 618,
+    "pct_beyond_horizon": 50.8642
+  },
+  "retreat_stats": {
+    "mean_year": 32.3877,
+    "median_year": 28.507,
+    "sd_year": 24.9167,
+    "min_year": 1,
+    "max_year": 73.92
+  },
+  "timing_breakdown": [
+    {
+      "timing_category": "beyond_horizon",
+      "n": 618,
+      "percent": 50.8642,
+      "label": "beyond_horizon: 618 (50.9%)"
+    },
+    {
+      "timing_category": "early",
+      "n": 113,
+      "percent": 9.3004,
+      "label": "early: 113 (9.3%)"
+    },
+    {
+      "timing_category": "immediate",
+      "n": 164,
+      "percent": 13.4979,
+      "label": "immediate: 164 (13.5%)"
+    },
+    {
+      "timing_category": "late",
+      "n": 187,
+      "percent": 15.3909,
+      "label": "late: 187 (15.4%)"
+    },
+    {
+      "timing_category": "mid_term",
+      "n": 133,
+      "percent": 10.9465,
+      "label": "mid_term: 133 (10.9%)"
+    }
+  ],
+  "trigger_breakdown": [
+    {
+      "retreat_trigger": "beyond_horizon",
+      "n": 618,
+      "percent": 50.8642,
+      "label": "beyond_horizon: 618 (50.9%)"
+    },
+    {
+      "retreat_trigger": "flood_storm_mc",
+      "n": 597,
+      "percent": 49.1358,
+      "label": "flood_storm_mc: 597 (49.1%)"
+    }
+  ],
+  "mc_stats": {
+    "n_properties_mc": 1215,
+    "mean_uncertainty_years": 0.6774,
+    "mean_range_years": 1.9043
+  }
+}

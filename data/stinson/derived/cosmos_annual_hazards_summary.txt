@@ -1,0 +1,61 @@
+========================================
+CoSMoS Annual Hazards Summary
+========================================
+Site: stinson
+Date: 2026-01-22
+Timeline: 2026-2100 (74 years from present)
+OPC 2024 baseline: 2020 (started 6 years ago)
+
+SCENARIOS:
+   Intermediate
+   Intermediate_High
+   High
+
+FLOODING SUMMARY (average annual conditions):
+
+  High:
+    Total (parcel × year) combinations: 30375
+    Flooded instances: 13712 (45.1%)
+
+  Intermediate:
+    Total (parcel × year) combinations: 30375
+    Flooded instances: 8241 (27.1%)
+
+  Intermediate_High:
+    Total (parcel × year) combinations: 30375
+    Flooded instances: 11180 (36.8%)
+
+
+FIRST FLOODING YEAR (average conditions):
+
+  High:
+    Parcels that flood: 362
+    Median first flood: Year 42 (2068)
+    Range: Year 0 (2026) to Year 73 (2099)
+
+  Intermediate:
+    Parcels that flood: 188
+    Median first flood: Year 31 (2057)
+    Range: Year 0 (2026) to Year 74 (2100)
+
+  Intermediate_High:
+    Parcels that flood: 313
+    Median first flood: Year 40 (2066)
+    Range: Year 0 (2026) to Year 74 (2100)
+
+DATA STRUCTURE:
+  Columns: year, slr_m, depth_m, parcel_id, scenario, flooded
+
+EXAMPLE (Parcel 1, Intermediate scenario, first 5 years from 2026):
+
+  Year 0 (2026): SLR=0.068m, depth=0.00m, flooded=FALSE
+  Year 1 (2027): SLR=0.073m, depth=0.00m, flooded=FALSE
+  Year 2 (2028): SLR=0.078m, depth=0.00m, flooded=FALSE
+  Year 3 (2029): SLR=0.083m, depth=0.00m, flooded=FALSE
+  Year 4 (2030): SLR=0.088m, depth=0.00m, flooded=FALSE
+
+NEXT STEPS:
+  1. Review this summary for sanity checks
+  2. Run cosmos_valuation_v3.R to compute optimal retreat timing
+  3. Analyze retreat schedule by scenario
+========================================

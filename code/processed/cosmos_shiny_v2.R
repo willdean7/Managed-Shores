@@ -29,7 +29,7 @@ library(jsonlite)
 # DATA LOADING
 
 # Configuration
-CASE_NAME <- "isla_vista"  # Change to isla_vista, pacifica as needed
+CASE_NAME <- "king_salmon"  # Change to isla_vista, pacifica as needed
 DATA_DIR <- file.path("data", CASE_NAME)
 DERIVED_DIR <- file.path(DATA_DIR, "derived")
 

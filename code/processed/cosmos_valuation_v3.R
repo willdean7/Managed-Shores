@@ -60,12 +60,12 @@ library(jsonlite)  # For saving community stats to JSON
 source("code/processed/monte_carlo_storms.R") 
 
 # CONFIGURATION
-case_name <- "isla_vista"  # Change for other sites
+case_name <- "king_salmon"  # Change for other sites
 data_dir <- file.path("data", case_name)
 derived_dir <- file.path(data_dir, "derived")
 
 # Planning horizon
-bigT <- 80    # Years (matches OPC 2024 projections)
+bigT <- 74    # Years (matches OPC 2024 projections, shifted to start from 2026 through 2100)
 
 # Depth-damage function parameters (fitted logistic curve)
 depth_params <- c(a = 0.4, b = 1, d = 2)
@@ -445,7 +445,7 @@ calc_tstar_one <- function(prop_id, scenario_name, cliff_scen_name, hazards_df, 
   
   # Timing category
   timing <- if (t_star > bigT) {
-    "no_retreat"
+    "beyond_horizon"
   } else if (t_star <= 10) {
     "immediate"
   } else if (t_star <= 25) {
@@ -460,7 +460,7 @@ calc_tstar_one <- function(prop_id, scenario_name, cliff_scen_name, hazards_df, 
     parcel_id = prop_id,
     scenario = scenario_name,
     cliff_scenario = cliff_scen_name,
-    T_star = t_star,
+    T_star = if (t_star > bigT) NA_real_ else t_star,
     T_flood = t_flood,
     T_cliff = t_cliff,
     initial_cliff_dist = initial_cliff_dist,
@@ -627,6 +627,7 @@ calculate_buyout_economics <- function(df) {
       # Uses the discount_rate column already in the dataframe
       npv_rent_to_tstar = mapply(
         function(rent, T, discount_rate) {
+          if (is.na(T)) return(NA_real_)  # Handle NA retreat years first
           if (T <= 0) return(0)
           if (T > bigT) return(NA_real_)
           beta <- 1 / (1 + discount_rate)
@@ -639,29 +640,29 @@ calculate_buyout_economics <- function(df) {
       buyout_price_uncapped = npv_rent_to_tstar + landval,
       
       buyout_price = if_else(
-        retreat_year <= bigT,
+        !is.na(retreat_year) & retreat_year <= bigT,
         pmin(npv_rent_to_tstar + landval, PRICE),  # Cap at market
         NA_real_
       ),
       
       # Track which properties were capped
       buyout_capped = if_else(
-        retreat_year <= bigT,
+        !is.na(retreat_year) & retreat_year <= bigT,
         buyout_price_uncapped > PRICE,
         NA
       ),
       
       # Comparison metrics
-      buyout_market_100pct = if_else(retreat_year <= bigT, PRICE, NA_real_),
+      buyout_market_100pct = if_else(!is.na(retreat_year) & retreat_year <= bigT, PRICE, NA_real_),
       
       buyout_savings_pct = if_else(
-        retreat_year <= bigT,
+        !is.na(retreat_year) & retreat_year <= bigT,
         100 * (1 - buyout_price / PRICE),
         NA_real_
       ),
       
       buyout_savings_dollars = if_else(
-        retreat_year <= bigT,
+        !is.na(retreat_year) & retreat_year <= bigT,
         PRICE - buyout_price,
         NA_real_
       ),
@@ -670,7 +671,7 @@ calculate_buyout_economics <- function(df) {
       gov_rent_collected = npv_rent_to_tstar,
       gov_land_recovered = landval,
       gov_net_cost = if_else(
-        retreat_year <= bigT,
+        !is.na(retreat_year) & retreat_year <= bigT,
         buyout_price - gov_rent_collected - gov_land_recovered,
         NA_real_
       ),
@@ -747,7 +748,7 @@ for (i in 1:nrow(timing_summary)) {
 }
 
 # Statistics for retreating properties
-retreating <- baseline_results %>% filter(retreat_year <= bigT)
+retreating <- baseline_results %>% filter(!is.na(retreat_year) & retreat_year <= bigT)
 
 if (nrow(retreating) > 0) {
   message("\nRetreating properties (", nrow(retreating), "):")
@@ -841,7 +842,7 @@ if (RUN_SENSITIVITY) {
       n_early = sum(timing_category == "early", na.rm = TRUE),
       n_mid = sum(timing_category == "mid_term", na.rm = TRUE),
       n_late = sum(timing_category == "late", na.rm = TRUE),
-      n_no_retreat = sum(timing_category == "no_retreat", na.rm = TRUE),
+      n_beyond_horizon = sum(timing_category == "beyond_horizon", na.rm = TRUE),
       # Add buyout economics summaries
       total_buyout_M = sum(buyout_price, na.rm = TRUE) / 1e6,
       total_market_M = sum(buyout_market_100pct, na.rm = TRUE) / 1e6,
@@ -865,6 +866,7 @@ baseline_results <- calculate_buyout_economics(baseline_results)
 retreating_for_buyout <- baseline_results %>% filter(!is.na(buyout_price))
 total_buyout <- sum(retreating_for_buyout$buyout_price, na.rm = TRUE)
 total_market <- sum(retreating_for_buyout$PRICE, na.rm = TRUE)
+
 total_savings <- sum(retreating_for_buyout$buyout_savings_dollars, na.rm = TRUE)
 n_capped <- sum(retreating_for_buyout$buyout_capped, na.rm = TRUE)
 

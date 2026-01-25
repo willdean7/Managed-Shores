@@ -78,7 +78,7 @@ library(purrr)
 
 
 # CONFIGURATION
-case_name <- "isla_vista"  # Change for other sites
+case_name <- "stinson"  # Change for other sites
 data_dir <- file.path("data", case_name)
 cosmos_dir <- file.path(data_dir, "cosmos")
 derived_dir <- file.path(data_dir, "derived")

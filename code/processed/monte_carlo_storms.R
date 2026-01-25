@@ -276,6 +276,7 @@ calc_tstar_monte_carlo <- function(prop_id, scenario_name, cliff_scen_name,
     }
     
     # Find retreat year for this timeline (vectorized comparison)
+    # NPV(staying) = NPV(net rent) - NPV(damages)
     npv_staying <- npv_r_vec - npv_d_vec
     
     # Find first year where staying is not profitable
@@ -304,12 +305,12 @@ calc_tstar_monte_carlo <- function(prop_id, scenario_name, cliff_scen_name,
   retreat_trigger <- if (tstar_mean <= bigT) {
     "flood_storm_mc"
   } else {
-    "no_retreat"
+    "beyond_horizon"
   }
   
   # Calculate timing category (based on mean T*)
   timing_category <- if (tstar_mean > bigT) {
-    "no_retreat"
+    "beyond_horizon"
   } else if (tstar_mean <= 10) {
     "immediate"
   } else if (tstar_mean <= 25) {
@@ -329,7 +330,7 @@ calc_tstar_monte_carlo <- function(prop_id, scenario_name, cliff_scen_name,
     parcel_id = prop_id,
     scenario = scenario_name,
     cliff_scenario = cliff_scen_name,
-    retreat_year = tstar_mean,  # Use MEAN as central estimate (expected value)
+    retreat_year = if (tstar_mean > bigT) NA_real_ else tstar_mean,  # NA if beyond horizon
     mc_enabled = TRUE,
     mc_n_sims = n_sims,
     mc_mean_year = tstar_mean,
@@ -410,7 +411,7 @@ calculate_community_stats <- function(results, planning_horizon = 80) {
   total_props <- nrow(results)
   
   # Properties that retreat within horizon
-  retreating <- results %>% filter(retreat_year <= planning_horizon)
+  retreating <- results %>% filter(!is.na(retreat_year) & retreat_year <= planning_horizon)
   n_retreating <- nrow(retreating)
   pct_retreating <- 100 * n_retreating / total_props
   
@@ -469,8 +470,8 @@ calculate_community_stats <- function(results, planning_horizon = 80) {
     total_properties = total_props,
     n_viable_retreat = n_retreating,
     pct_viable_retreat = pct_retreating,
-    n_no_retreat = total_props - n_retreating,
-    pct_no_retreat = 100 * (total_props - n_retreating) / total_props
+    n_beyond_horizon = total_props - n_retreating,
+    pct_beyond_horizon = 100 * (total_props - n_retreating) / total_props
   )
   
   return(list(
@@ -488,9 +489,7 @@ calculate_community_stats <- function(results, planning_horizon = 80) {
 #' @param community_stats Output from calculate_community_stats()
 print_community_stats <- function(community_stats) {
   
-  cat("\n========================================\n")
   cat("COMMUNITY-LEVEL STATISTICS\n")
-  cat("========================================\n\n")
   
   # Economic viability
   ev <- community_stats$economic_viability
@@ -498,8 +497,7 @@ print_community_stats <- function(community_stats) {
   cat("  Total properties:", ev$total_properties, "\n")
   cat("  Economically viable for retreat:", ev$n_viable_retreat, 
       "(", round(ev$pct_viable_retreat, 1), "%)\n")
-  cat("  No retreat needed:", ev$n_no_retreat, 
-      "(", round(ev$pct_no_retreat, 1), "%)\n\n")
+  cat("  Beyond planning horizon:", ev$n_beyond_horizon, "(", round(ev$pct_beyond_horizon, 1), "%)\n\n")
   
   # Retreat timing
   rs <- community_stats$retreat_stats
