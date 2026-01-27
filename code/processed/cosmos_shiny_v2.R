@@ -90,6 +90,53 @@ scenarios_raw <- unique(all_results$scenario) %>% na.omit()
 scenario_order <- c("Intermediate", "Intermediate_High", "High")
 scenarios <- scenario_order[scenario_order %in% scenarios_raw]
 
+#Function to calculate NPV components for a single property
+calculate_npv_components_property <- function(parcel_id, scenario, hazards_data, baseline_data, bigT = 75) {
+  
+  # Get property parameters
+  prop_params <- baseline_data %>%
+    filter(parcel_id == !!parcel_id, scenario == !!scenario) %>%
+    slice(1)
+  
+  if (nrow(prop_params) == 0) return(NULL)
+  
+  rent <- prop_params$rent
+  discount_rate <- prop_params$discount_rate
+  damage_threshold <- prop_params$damage_threshold
+  strval <- prop_params$strval
+  beta <- 1 / (1 + discount_rate)
+  
+  # Depth-damage params
+  depth_params <- c(a = 0.4, b = 1, d = 2)
+  
+  # Get flood timeline
+  flood_timeline <- hazards_data %>%
+    filter(parcel_id == !!parcel_id, scenario == !!scenario) %>%
+    arrange(year) %>%
+    mutate(
+      depth_clean = if_else(depth_m >= damage_threshold, depth_m, 0),
+      damage_frac = depth_params["a"] / (1 + exp(-depth_params["b"] * (depth_clean - depth_params["d"]))),
+      damage_frac = pmax(damage_frac, 0),
+      annual_damage = damage_frac * strval
+    )
+  
+  if (nrow(flood_timeline) == 0) return(NULL)
+  
+  # Calculate NPV components from each year forward
+  npv_data <- tibble(year = 1:min(bigT, nrow(flood_timeline))) %>%
+    mutate(
+      npv_rent = map_dbl(year, function(t) {
+        years_remaining <- bigT - t + 1
+        rent * sum(beta^(1:years_remaining))
+      }),
+      npv_damage = map_dbl(year, function(t) {
+        years_remaining <- bigT - t + 1
+        sum(flood_timeline$annual_damage[t:bigT] * beta^(1:years_remaining))
+      })
+    )
+  
+  return(npv_data)
+}
 # Extract cliff scenario options (for cliff-only sites)
 cliff_scenarios_raw <- unique(all_results$cliff_scenario) %>% na.omit()
 cliff_scenarios <- if(length(cliff_scenarios_raw) > 0) {
@@ -102,6 +149,57 @@ has_cliff_scenarios <- !is.null(cliff_scenarios) && length(cliff_scenarios) > 1
 # Check for government economics columns
 has_gov_econ <- all(c("gov_net_cost", "gov_outcome", "gov_rent_collected", "gov_land_recovered") %in% names(baseline_results))
 has_buyout_cap <- "buyout_capped" %in% names(baseline_results)
+
+# =============================================================================
+# HELPER FUNCTION: Calculate NPV components for property
+# =============================================================================
+
+calculate_npv_components_property <- function(parcel_id, scenario, hazards_data, baseline_data, bigT = 75) {
+  
+  # Get property parameters
+  prop_params <- baseline_data %>%
+    filter(parcel_id == !!parcel_id, scenario == !!scenario) %>%
+    slice(1)
+  
+  if (nrow(prop_params) == 0) return(NULL)
+  
+  rent <- prop_params$rent
+  discount_rate <- prop_params$discount_rate
+  damage_threshold <- prop_params$damage_threshold
+  strval <- prop_params$strval
+  beta <- 1 / (1 + discount_rate)
+  
+  # Depth-damage params
+  depth_params <- c(a = 0.4, b = 1, d = 2)
+  
+  # Get flood timeline
+  flood_timeline <- hazards_data %>%
+    filter(parcel_id == !!parcel_id, scenario == !!scenario) %>%
+    arrange(year) %>%
+    mutate(
+      depth_clean = if_else(depth_m >= damage_threshold, depth_m, 0),
+      damage_frac = depth_params["a"] / (1 + exp(-depth_params["b"] * (depth_clean - depth_params["d"]))),
+      damage_frac = pmax(damage_frac, 0),
+      annual_damage = damage_frac * strval
+    )
+  
+  if (nrow(flood_timeline) == 0) return(NULL)
+  
+  # Calculate NPV components from each year forward
+  npv_data <- tibble(year = 1:min(bigT, nrow(flood_timeline))) %>%
+    mutate(
+      npv_rent = map_dbl(year, function(t) {
+        years_remaining <- bigT - t + 1
+        rent * sum(beta^(1:years_remaining))
+      }),
+      npv_damage = map_dbl(year, function(t) {
+        years_remaining <- bigT - t + 1
+        sum(flood_timeline$annual_damage[t:bigT] * beta^(1:years_remaining))
+      })
+    )
+  
+  return(npv_data)
+}
 
 # =============================================================================
 # UI
@@ -456,8 +554,11 @@ ui <- dashboardPage(
             width = 3,
             uiOutput("selected_property_info"),
             hr(),
-            uiOutput("selected_property_econ")
-          )
+            uiOutput("selected_property_econ"),
+            hr(),
+            h4("NPV Timeline", style = "font-weight: bold;"),
+            plotlyOutput("selected_property_npv", height = "300px")
+          ),
         )
       ),
       
@@ -1396,17 +1497,27 @@ server <- function(input, output, session) {
   output$retreat_map <- renderLeaflet({
     df <- filtered_data()  # Changed from baseline_data() to filtered_data()
     
-    # Create color palette - ORDERED BY TIMING!
-    # immediate (red) → early (orange) → mid_term (yellow) → late (blue) → no_retreat (gray)
+    # Ensure timing_category is a factor with correct chronological order
+    df <- df %>%
+      mutate(
+        timing_category = factor(
+          timing_category,
+          levels = c("immediate", "early", "mid_term", "late", "beyond_horizon"),
+          ordered = TRUE
+        )
+      )
+    
+    # Create color palette - ORDERED BY TIMING (chronological)!
+    # immediate (red) → early (orange) → mid_term (yellow) → late (blue) → beyond_horizon (gray)
     pal <- colorFactor(
       palette = c(
-        "immediate" = "#d73027",    # Red (urgent!)
-        "early" = "#fc8d59",         # Orange  
-        "mid_term" = "#fee08b",      # Yellow
-        "late" = "#91bfdb",          # Light blue
-        "no_retreat" = "#4575b4"     # Dark blue
+        "immediate" = "#d73027",        # Red (urgent!)
+        "early" = "#fc8d59",            # Orange  
+        "mid_term" = "#fee08b",         # Yellow
+        "late" = "#91bfdb",             # Light blue
+        "beyond_horizon" = "#999999"    # Gray
       ),
-      levels = c("immediate", "early", "mid_term", "late", "no_retreat")  # Explicit order
+      levels = c("immediate", "early", "mid_term", "late", "beyond_horizon")  # Explicit chronological order
     )
     
     # Create map
@@ -1487,6 +1598,82 @@ server <- function(input, output, session) {
         ))
       }
     }
+  })
+  
+  # NPV timeline plot for selected property
+  output$selected_property_npv <- renderPlotly({
+    req(input$retreat_map_marker_click)
+    
+    # Load hazards data
+    hazards_file <- file.path(DERIVED_DIR, "cosmos_annual_hazards.csv")
+    if (!file.exists(hazards_file)) {
+      return(plotly_empty() %>% 
+               layout(title = list(text = "Hazards data not available", 
+                                   font = list(size = 10))))
+    }
+    
+    hazards <- read_csv(hazards_file, show_col_types = FALSE)
+    
+    # Get clicked property
+    click <- input$retreat_map_marker_click
+    selected_prop <- filtered_data() %>%
+      filter(parcel_id == click$id) %>%
+      slice(1)
+    
+    if (nrow(selected_prop) == 0) {
+      return(plotly_empty() %>%
+               layout(title = list(text = "No property selected",
+                                   font = list(size = 10))))
+    }
+    
+    # Calculate NPV components
+    npv_data <- calculate_npv_components_property(
+      parcel_id = selected_prop$parcel_id,
+      scenario = selected_prop$scenario,
+      hazards_data = hazards,
+      baseline_data = filtered_data(),
+      bigT = 75
+    )
+    
+    if (is.null(npv_data)) {
+      return(plotly_empty() %>% 
+               layout(title = list(text = "NPV data not available",
+                                   font = list(size = 10))))
+    }
+    
+    # Reshape for plotting
+    npv_long <- npv_data %>%
+      pivot_longer(cols = c(npv_rent, npv_damage), 
+                   names_to = "component", 
+                   values_to = "value") %>%
+      mutate(component = recode(component,
+                                npv_rent = "Rental Income",
+                                npv_damage = "Flood Damages"))
+    
+    # Create plot
+    p <- ggplot(npv_long, aes(x = year, y = value, color = component)) +
+      geom_line(size = 1.2) +
+      labs(x = "Year", y = "NPV ($)", color = "") +
+      scale_y_continuous(labels = dollar_format()) +
+      scale_color_manual(values = c("Rental Income" = "#27ae60", 
+                                    "Flood Damages" = "#c0392b")) +
+      theme_minimal(base_size = 9) +
+      theme(legend.position = "bottom",
+            legend.text = element_text(size = 8),
+            axis.title = element_text(size = 9),
+            axis.text = element_text(size = 8))
+    
+    # Add T* marker if available
+    if (!is.na(selected_prop$retreat_year)) {
+      p <- p + geom_vline(xintercept = selected_prop$retreat_year, 
+                          linetype = "dashed", color = "black", alpha = 0.6)
+    }
+    
+    ggplotly(p, tooltip = c("x", "y")) %>%
+      layout(
+        legend = list(orientation = "h", y = -0.25, x = 0.5, xanchor = "center"),
+        margin = list(l = 50, r = 20, t = 20, b = 60)
+      )
   })
   
   # RESET BUTTON
