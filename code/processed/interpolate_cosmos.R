@@ -30,7 +30,7 @@ library(stringr)
 
 
 # CONFIGURATION
-case_name <- "stinson"  # Change for other sites
+case_name <- "carpinteria"  # Change for other sites
 data_dir <- file.path("data", case_name)
 derived_dir <- file.path(data_dir, "derived")
 
@@ -117,6 +117,27 @@ for (scen in names(slr_scenarios)) {
                   scen, slr_vec[1], slr_vec[41], bigT, CURRENT_YEAR + bigT, slr_vec[bigT + 1]))
 }
 
+# SAVE SLR PROJECTION CURVES FOR VISUALIZATION
+message("\n→ Saving SLR projection curves for methods figures...")
+slr_curves <- bind_rows(
+  tibble(scenario = "Intermediate", 
+         year = 0:bigT, 
+         calendar_year = CURRENT_YEAR + (0:bigT),
+         slr_m = slr_scenarios[["Intermediate"]]),
+  tibble(scenario = "Intermediate_High", 
+         year = 0:bigT, 
+         calendar_year = CURRENT_YEAR + (0:bigT),
+         slr_m = slr_scenarios[["Intermediate_High"]]),
+  tibble(scenario = "High", 
+         year = 0:bigT, 
+         calendar_year = CURRENT_YEAR + (0:bigT),
+         slr_m = slr_scenarios[["High"]])
+)
+
+slr_curves_path <- file.path(derived_dir, "slr_projection_curves.csv")
+write_csv(slr_curves, slr_curves_path)
+message("✓ Saved SLR curves: ", basename(slr_curves_path))
+
 # INTERPOLATION FUNCTIONS
 
 # For a single parcel, interpolate hazard metrics at each year's SLR level
@@ -136,6 +157,20 @@ interpolate_annual_hazards <- function(parcel_hazards, slr_annual_vec, parcel_nu
     "runup_dist_m",
     "shore_dist_m", "cliff_dist_m"
   )
+  
+  # Baseline metrics (constant, don't interpolate)
+  baseline_metrics <- c(
+    "baseline_cliff_dist_m"  # Current cliff distance - same for all years
+  )
+  
+  # Add baseline columns (constant values)
+  for (metric in baseline_metrics) {
+    if (metric %in% names(parcel_hazards)) {
+      # Use first value (should be same for all SLR within a parcel-scenario)
+      baseline_value <- parcel_hazards[[metric]][1]
+      results[[metric]] <- rep(baseline_value, length(years))
+    }
+  }
   
   for (metric in continuous_metrics) {
     if (metric %in% names(parcel_hazards)) {
@@ -286,6 +321,45 @@ out_csv <- file.path(derived_dir, "cosmos_annual_hazards.csv")
 write_csv(annual_hazards, out_csv)
 
 message("✓ Saved: ", out_csv)
+
+
+# SAVE EXAMPLE INTERPOLATIONS FOR METHODS VISUALIZATION
+if (has_flood_data) {
+  message("\n→ Saving example depth interpolations for methods figures...")
+  
+  # Select 5 example properties (or fewer if less available)
+  n_examples <- min(5, n_distinct(annual_hazards$parcel_id))
+  example_parcels <- sample(unique(annual_hazards$parcel_id), n_examples)
+  
+  # Get their interpolated depths (just Intermediate scenario)
+  example_depths <- annual_hazards %>%
+    filter(parcel_id %in% example_parcels,
+           scenario == "Intermediate") %>%
+    select(parcel_id, year, slr_m, depth_m, flooded) %>%
+    mutate(calendar_year = CURRENT_YEAR + year)
+  
+  # Also get their original static CoSMoS data for comparison
+  example_static <- hazards %>%
+    filter(parcel_id %in% example_parcels) %>%
+    select(parcel_id, slr_m, depth_m) %>%
+    mutate(data_type = "static_cosmos")
+  
+  # Mark the interpolated data
+  example_interp <- example_depths %>%
+    select(parcel_id, slr_m, depth_m) %>%
+    mutate(data_type = "interpolated")
+  
+  # Combine for easy plotting
+  example_combined <- bind_rows(example_static, example_interp)
+  
+  example_path <- file.path(derived_dir, "example_depth_interpolations.csv")
+  write_csv(example_combined, example_path)
+  message("✓ Saved example interpolations: ", basename(example_path))
+  message("  Properties: ", paste(example_parcels, collapse = ", "))
+  
+} else {
+  message("\n→ Skipping example interpolations (no flood data)")
+}
 
 
 # SUMMARY REPORT
