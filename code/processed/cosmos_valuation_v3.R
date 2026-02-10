@@ -13,11 +13,12 @@
 #     as part of standard lease agreement. Government only pays for flood damages.
 #   
 #   Buyout-Leaseback Pricing:
-#     Buyout Price = NPV(future rental income from year 1 to T*) + Land Value
-#     - Compensates owner for lost rental income stream and land
-#     - Does NOT pay for structure value (economically obsolete at T*)
+#     Buyout Price = NPV(rental income from year 0 to T*)
+#     - Compensates owner for lost rental income stream
+#     - Rental income already reflects both structure and land value
+#     - At T*, land has no residual value (flooded or cliff failure imminent)
 #     - Government leases property back to owner, receives rental income
-#     - Eventually acquires land when structure fails
+#     - Eventually demolishes structure; land has no further economic value
 #   
 #   Leaseback Structure:
 #     - Tenant (former owner) pays market rent
@@ -55,12 +56,12 @@ library(tidyr)
 library(readr)
 library(purrr)
 library(stringr)
-library(jsonlite)  # For saving community stats to JSON
+library(jsonlite)
 
 source("code/processed/monte_carlo_storms.R") 
 
 # CONFIGURATION
-case_name <- "king_salmon"  # Change for other sites
+case_name <- "carpinteria"  # Change for other sites
 data_dir <- file.path("data", case_name)
 derived_dir <- file.path(data_dir, "derived")
 
@@ -365,6 +366,53 @@ calc_tstar_one <- function(prop_id, scenario_name, cliff_scen_name, hazards_df, 
   str_val <- prop$strval[1]
   beta <- 1 / (1 + discount_rate)
   
+  # Pre-compute NPV components
+  beta_powers <- beta^(1:bigT)
+  
+  # NPV of rent from each starting year
+  npv_r_vec <- numeric(bigT)
+  for (t in 1:bigT) {
+    years_remaining <- bigT - t + 1
+    npv_r_vec[t] <- rent_val * sum(beta_powers[1:years_remaining])
+  }
+  
+  # NPV of damages from each starting year (for flood sites only)
+  if (site_type %in% c("FLOOD-ONLY", "HYBRID (flood + cliff)")) {
+    
+    # Get flood depth timeline
+    if ("depth_m" %in% names(prop_hazards)) {
+      depth_vec <- prop_hazards$depth_m
+      depth_vec[is.na(depth_vec)] <- 0
+      depth_vec[depth_vec < damage_threshold] <- 0
+      
+      # Calculate annual damages
+      a <- depth_params["a"]
+      b <- depth_params["b"]
+      d <- depth_params["d"]
+      damage_fraction <- a / (1 + exp(-b * (depth_vec - d)))
+      damage_fraction <- pmax(damage_fraction, 0)
+      annual_damages <- damage_fraction * str_val
+      
+      # NPV of damages from each starting year
+      npv_d_vec <- numeric(bigT)
+      for (t in 1:bigT) {
+        if (t <= length(annual_damages)) {
+          years_remaining <- min(bigT - t + 1, length(annual_damages) - t + 1)
+          if (years_remaining > 0) {
+            npv_d_vec[t] <- sum(annual_damages[t:min(length(annual_damages), bigT)] * 
+                                  beta_powers[1:years_remaining])
+          }
+        }
+      }
+    } else {
+      npv_d_vec <- rep(0, bigT)
+    }
+    
+  } else {
+    # Cliff-only site: no flood damages
+    npv_d_vec <- rep(0, bigT)
+  }
+  
   # Initialize retreat years
   t_flood <- bigT + 1
   t_cliff <- bigT + 1
@@ -381,7 +429,15 @@ calc_tstar_one <- function(prop_id, scenario_name, cliff_scen_name, hazards_df, 
     
     if ("cliff_dist_m" %in% names(prop_hazards)) {
       cliff_dist_ts <- prop_hazards$cliff_dist_m
-      initial_cliff_dist <- cliff_dist_ts[1]  # Year 1 distance
+      
+      # Use BASELINE (current) cliff distance for initial exposure
+      if ("baseline_cliff_dist_m" %in% names(prop_hazards)) {
+        initial_cliff_dist <- prop_hazards$baseline_cliff_dist_m[1]  # Current (2026) distance
+      } else {
+        # Fallback for old data without baseline
+        initial_cliff_dist <- cliff_dist_ts[1]  # Year 1 distance
+        warning("No baseline_cliff_dist_m found, using cliff_dist_m[1] as fallback")
+      }
       
       if (!all(is.na(cliff_dist_ts))) {
         
@@ -461,6 +517,9 @@ calc_tstar_one <- function(prop_id, scenario_name, cliff_scen_name, hazards_df, 
     scenario = scenario_name,
     cliff_scenario = cliff_scen_name,
     T_star = if (t_star > bigT) NA_real_ else t_star,
+    npv_rent_annual = list(npv_r_vec),
+    npv_damages_annual = list(npv_d_vec),
+    npv_net_annual = list(npv_r_vec - npv_d_vec),
     T_flood = t_flood,
     T_cliff = t_cliff,
     initial_cliff_dist = initial_cliff_dist,
@@ -575,7 +634,6 @@ run_scenario <- function(rental_yield, discount_rate, damage_threshold,
   
   retreat_schedule <- retreat_schedule %>%
     mutate(
-      parameter_set = scenario_label,
       rental_yield = rental_yield,
       discount_rate = discount_rate,
       damage_threshold = damage_threshold
@@ -598,7 +656,6 @@ run_scenario <- function(rental_yield, discount_rate, damage_threshold,
     mc_distributions_df <- bind_rows(mc_distributions_list)
     mc_distributions_df <- mc_distributions_df %>%
       mutate(
-        parameter_set = scenario_label,
         rental_yield = rental_yield,
         discount_rate = discount_rate,
         damage_threshold = damage_threshold
@@ -636,12 +693,13 @@ calculate_buyout_economics <- function(df) {
         rent, retreat_year, discount_rate
       ),
       
-      # BUYOUT PRICE: NPV of future rent stream + land value, CAPPED at market price
-      buyout_price_uncapped = npv_rent_to_tstar + landval,
+      # BUYOUT PRICE: NPV of future rent stream only (no land value)
+      # Government recovers land value when structure eventually fails
+      buyout_price_uncapped = npv_rent_to_tstar,
       
       buyout_price = if_else(
         !is.na(retreat_year) & retreat_year <= bigT,
-        pmin(npv_rent_to_tstar + landval, PRICE),  # Cap at market
+        pmin(npv_rent_to_tstar, PRICE),  # Cap at market (though unlikely to exceed now)
         NA_real_
       ),
       
@@ -653,8 +711,6 @@ calculate_buyout_economics <- function(df) {
       ),
       
       # Comparison metrics
-      buyout_market_100pct = if_else(!is.na(retreat_year) & retreat_year <= bigT, PRICE, NA_real_),
-      
       buyout_savings_pct = if_else(
         !is.na(retreat_year) & retreat_year <= bigT,
         100 * (1 - buyout_price / PRICE),
@@ -668,23 +724,143 @@ calculate_buyout_economics <- function(df) {
       ),
       
       # GOVERNMENT ECONOMICS
+      # Gov pays buyout, receives back rent
+      # Land has no value at T* (flooded or cliff failure)
+      # Net cost = Buyout - Rent
       gov_rent_collected = npv_rent_to_tstar,
-      gov_land_recovered = landval,
       gov_net_cost = if_else(
         !is.na(retreat_year) & retreat_year <= bigT,
-        buyout_price - gov_rent_collected - gov_land_recovered,
+        buyout_price - gov_rent_collected,
         NA_real_
       ),
       
       # Government outcome category
+      # Note: gov_net_cost = buyout - rent collected
+      # Since buyout = NPV(rent), this should typically equal zero
       gov_outcome = case_when(
         is.na(gov_net_cost) ~ NA_character_,
-        gov_net_cost < 0 ~ "profit",
-        gov_net_cost == 0 ~ "break_even",
-        gov_net_cost <= landval * 0.1 ~ "near_break_even",
+        gov_net_cost < -1000 ~ "profit",  # Collected more rent than expected (shouldn't happen)
+        abs(gov_net_cost) <= 1000 ~ "break_even",  # Within $1k (rounding)
+        gov_net_cost <= PRICE * 0.05 ~ "near_break_even",  # Within 5% of property value
         TRUE ~ "net_cost"
       )
     )
+}
+
+# More error sensitivity calculations (e.g., T* off by ±5 years)
+# ==============================================================================
+# TIMING SENSITIVITY ANALYSIS
+# ==============================================================================
+# Calculate impacts if optimal retreat year (T*) is mis-estimated
+# Shows how costs shift between public and private parties
+
+calculate_timing_sensitivity <- function(df, planning_horizon = bigT) {
+  
+  message("\n→ Calculating timing sensitivity analysis...")
+  message("  (What happens if T* is off by ±5 or ±10 years?)")
+  
+  # Only analyze properties that retreat within planning horizon
+  retreating <- df %>% 
+    filter(!is.na(retreat_year), retreat_year <= planning_horizon)
+  
+  if (nrow(retreating) == 0) {
+    message("  No properties retreating - skipping analysis")
+    return(NULL)
+  }
+  
+  # Helper function to calculate NPV of rent stream
+  calc_npv_rent <- function(rent, years, disc_rate) {
+    if (years <= 0) return(0)
+    if (years > planning_horizon) years <- planning_horizon
+    beta <- 1 / (1 + disc_rate)
+    rent * (1 - beta^years) / (1 - beta)
+  }
+  
+  # For each property, calculate costs under different timing scenarios
+  sensitivity_results <- retreating %>%
+    mutate(
+      # Baseline (T* is correct)
+      baseline_buyout = buyout_price,
+      baseline_gov_cost = gov_net_cost,
+      baseline_owner_loss = PRICE - buyout_price,
+      
+      # Scenario 1: Retreat 5 years too early
+      t_minus5 = pmax(retreat_year - 5, 1),
+      npv_rent_minus5 = mapply(calc_npv_rent, rent, t_minus5, discount_rate),
+      buyout_minus5 = pmin(npv_rent_minus5 + landval, PRICE),
+      gov_cost_minus5 = buyout_minus5 - npv_rent_to_tstar,  # Lost opportunity cost
+      owner_loss_minus5 = PRICE - buyout_minus5,
+      
+      # Scenario 2: Retreat 5 years too late
+      t_plus5 = pmin(retreat_year + 5, planning_horizon),
+      npv_rent_plus5 = mapply(calc_npv_rent, rent, t_plus5, discount_rate),
+      buyout_plus5 = pmin(npv_rent_plus5 + landval, PRICE),
+      gov_cost_plus5 = buyout_plus5 - npv_rent_to_tstar,  # Extra damages paid
+      owner_loss_plus5 = PRICE - buyout_plus5,
+      
+      # Scenario 3: Retreat 10 years too early
+      t_minus10 = pmax(retreat_year - 10, 1),
+      npv_rent_minus10 = mapply(calc_npv_rent, rent, t_minus10, discount_rate),
+      buyout_minus10 = pmin(npv_rent_minus10 + landval, PRICE),
+      gov_cost_minus10 = buyout_minus10 - npv_rent_to_tstar,
+      owner_loss_minus10 = PRICE - buyout_minus10,
+      
+      # Scenario 4: Retreat 10 years too late  
+      t_plus10 = pmin(retreat_year + 10, planning_horizon),
+      npv_rent_plus10 = mapply(calc_npv_rent, rent, t_plus10, discount_rate),
+      buyout_plus10 = pmin(npv_rent_plus10 + landval, PRICE),
+      gov_cost_plus10 = buyout_plus10 - npv_rent_to_tstar,
+      owner_loss_plus10 = PRICE - buyout_plus10,
+      
+      # Calculate deltas from baseline
+      gov_cost_delta_minus5 = gov_cost_minus5 - baseline_gov_cost,
+      gov_cost_delta_plus5 = gov_cost_plus5 - baseline_gov_cost,
+      gov_cost_delta_minus10 = gov_cost_minus10 - baseline_gov_cost,
+      gov_cost_delta_plus10 = gov_cost_plus10 - baseline_gov_cost,
+      
+      owner_loss_delta_minus5 = owner_loss_minus5 - baseline_owner_loss,
+      owner_loss_delta_plus5 = owner_loss_plus5 - baseline_owner_loss,
+      owner_loss_delta_minus10 = owner_loss_minus10 - baseline_owner_loss,
+      owner_loss_delta_plus10 = owner_loss_plus10 - baseline_owner_loss
+    )
+  
+  # Summary statistics
+  summary_stats <- sensitivity_results %>%
+    summarise(
+      n_properties = n(),
+      
+      # Government costs
+      mean_gov_cost_baseline = mean(baseline_gov_cost, na.rm = TRUE),
+      mean_gov_cost_minus5 = mean(gov_cost_minus5, na.rm = TRUE),
+      mean_gov_cost_plus5 = mean(gov_cost_plus5, na.rm = TRUE),
+      mean_gov_cost_minus10 = mean(gov_cost_minus10, na.rm = TRUE),
+      mean_gov_cost_plus10 = mean(gov_cost_plus10, na.rm = TRUE),
+      
+      # Owner losses
+      mean_owner_loss_baseline = mean(baseline_owner_loss, na.rm = TRUE),
+      mean_owner_loss_minus5 = mean(owner_loss_minus5, na.rm = TRUE),
+      mean_owner_loss_plus5 = mean(owner_loss_plus5, na.rm = TRUE),
+      mean_owner_loss_minus10 = mean(owner_loss_minus10, na.rm = TRUE),
+      mean_owner_loss_plus10 = mean(owner_loss_plus10, na.rm = TRUE),
+      
+      # Total community costs
+      total_gov_delta_minus5 = sum(gov_cost_delta_minus5, na.rm = TRUE),
+      total_gov_delta_plus5 = sum(gov_cost_delta_plus5, na.rm = TRUE),
+      total_gov_delta_minus10 = sum(gov_cost_delta_minus10, na.rm = TRUE),
+      total_gov_delta_plus10 = sum(gov_cost_delta_plus10, na.rm = TRUE),
+      
+      total_owner_delta_minus5 = sum(owner_loss_delta_minus5, na.rm = TRUE),
+      total_owner_delta_plus5 = sum(owner_loss_delta_plus5, na.rm = TRUE),
+      total_owner_delta_minus10 = sum(owner_loss_delta_minus10, na.rm = TRUE),
+      total_owner_delta_plus10 = sum(owner_loss_delta_plus10, na.rm = TRUE)
+    )
+  
+  message("✓ Timing sensitivity calculated for ", nrow(sensitivity_results), " properties")
+  
+  return(list(
+    property_level = sensitivity_results,
+    summary = summary_stats
+  ))
 }
 
 
@@ -746,6 +922,7 @@ message("\nRetreat timing:")
 for (i in 1:nrow(timing_summary)) {
   message("  ", timing_summary$timing_category[i], ": ", timing_summary$count[i])
 }
+
 
 # Statistics for retreating properties
 retreating <- baseline_results %>% filter(!is.na(retreat_year) & retreat_year <= bigT)
@@ -824,15 +1001,38 @@ if (RUN_SENSITIVITY) {
   message("\n→ Calculating buyout economics for SENSITIVITY...")
   sensitivity_results <- calculate_buyout_economics(sensitivity_results)
   
+  # Save as RDS (preserves list columns)
+  sensitivity_rds_path <- file.path(derived_dir, "retreat_schedule_sensitivity.rds")
+  saveRDS(sensitivity_results, sensitivity_rds_path)
+  message("✓ Saved sensitivity as RDS: ", basename(sensitivity_rds_path))
+  
+  # Flatten list columns for CSV
+  sensitivity_for_csv <- sensitivity_results %>%
+    mutate(
+      npv_rent_annual_str = sapply(npv_rent_annual, function(x) {
+        if (is.null(x) || length(x) == 0) return("")
+        paste(x, collapse = ",")
+      }),
+      npv_damages_annual_str = sapply(npv_damages_annual, function(x) {
+        if (is.null(x) || length(x) == 0) return("")
+        paste(x, collapse = ",")
+      }),
+      npv_net_annual_str = sapply(npv_net_annual, function(x) {
+        if (is.null(x) || length(x) == 0) return("")
+        paste(x, collapse = ",")
+      })
+    ) %>%
+    select(-npv_rent_annual, -npv_damages_annual, -npv_net_annual)
+  
   sensitivity_path <- file.path(derived_dir, "retreat_schedule_sensitivity.csv")
-  write_csv(sensitivity_results, sensitivity_path)
-  message("\n✓ Saved sensitivity: ", basename(sensitivity_path))
+  write_csv(sensitivity_for_csv, sensitivity_path)
+  message("✓ Saved sensitivity as CSV: ", basename(sensitivity_path))
   message("  Rows: ", format(nrow(sensitivity_results), big.mark = ","))
   message("  Includes: retreat timing + buyout economics + government economics")
   
   # Summary
   sensitivity_summary <- sensitivity_results %>%
-    group_by(parameter_set, scenario, cliff_scenario, 
+    group_by(scenario, cliff_scenario, 
              rental_yield, discount_rate, damage_threshold) %>%
     summarise(
       n_properties = n(),
@@ -845,7 +1045,6 @@ if (RUN_SENSITIVITY) {
       n_beyond_horizon = sum(timing_category == "beyond_horizon", na.rm = TRUE),
       # Add buyout economics summaries
       total_buyout_M = sum(buyout_price, na.rm = TRUE) / 1e6,
-      total_market_M = sum(buyout_market_100pct, na.rm = TRUE) / 1e6,
       gov_net_cost_M = sum(gov_net_cost, na.rm = TRUE) / 1e6,
       n_capped = sum(buyout_capped, na.rm = TRUE),
       n_gov_profit = sum(gov_outcome == "profit", na.rm = TRUE),
@@ -919,10 +1118,51 @@ message("  Average market: $", format(round(avg_market / 1e3), big.mark = ","), 
 #     buyout_price_110pct = if_else(retreat_year <= bigT, PRICE * 1.10, NA_real_)
 #   )
 
+timing_sensitivity <- calculate_timing_sensitivity(baseline_results)
+
+if (!is.null(timing_sensitivity)) {
+  # Save property-level results
+  timing_path <- file.path(derived_dir, "timing_sensitivity_baseline.csv")
+  write_csv(timing_sensitivity$property_level, timing_path)
+  message("✓ Saved timing sensitivity: ", basename(timing_path))
+  
+  # Save summary
+  timing_summary_path <- file.path(derived_dir, "timing_sensitivity_summary.csv")
+  write_csv(timing_sensitivity$summary, timing_summary_path)
+  message("✓ Saved timing summary: ", basename(timing_summary_path))
+}
+
+
 # SAVE BASELINE RESULTS (with buyout prices)
+
+# Save full data as RDS (preserves list columns)
+rds_path <- file.path(derived_dir, "retreat_schedule_baseline.rds")
+saveRDS(baseline_results, rds_path)
+message("✓ Saved baseline as RDS (with list columns): ", basename(rds_path))
+
+# Flatten list columns to strings for CSV export
+baseline_for_csv <- baseline_results %>%
+  mutate(
+    npv_rent_annual_str = sapply(npv_rent_annual, function(x) {
+      if (is.null(x) || length(x) == 0) return("")
+      paste(x, collapse = ",")
+    }),
+    npv_damages_annual_str = sapply(npv_damages_annual, function(x) {
+      if (is.null(x) || length(x) == 0) return("")
+      paste(x, collapse = ",")
+    }),
+    npv_net_annual_str = sapply(npv_net_annual, function(x) {
+      if (is.null(x) || length(x) == 0) return("")
+      paste(x, collapse = ",")
+    })
+  ) %>%
+  select(-npv_rent_annual, -npv_damages_annual, -npv_net_annual)  # Remove list columns
+
 baseline_path <- file.path(derived_dir, "retreat_schedule_baseline.csv")
-write_csv(baseline_results, baseline_path)
-message("✓ Saved baseline with buyout prices: ", basename(baseline_path))
+write_csv(baseline_for_csv, baseline_path)
+message("✓ Saved baseline as CSV (NPV as comma-separated): ", basename(baseline_path))
+message("  → For visualization in R: use readRDS('", basename(rds_path), "')")
+message("  → For spreadsheets: NPV columns are in *_str format")
 
 # SAVE MONTE CARLO DISTRIBUTIONS (for Shiny visualization)
 if (!is.null(baseline_mc_distributions) && nrow(baseline_mc_distributions) > 0) {

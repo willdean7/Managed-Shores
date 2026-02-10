@@ -286,6 +286,164 @@ process_cliff_scenario_shapefile <- function(scenario_path, scenario_name) {
 }
 
 
+# FUNCTION: Extract baseline from extracted .lpk shapefiles and convert to line
+
+process_baseline_cencal <- function(scenario_name) {
+  
+  message("\n→ Extracting baseline for ", scenario_name, " (CenCal)")
+  
+  # Path to extracted .lpk shapefiles
+  scenario_path <- file.path(cliff_base, paste0("Management_Scenario-", scenario_name))
+  
+  # Look for Baseline.shp in the extracted .lpk structure
+  possible_paths <- c(
+    file.path(scenario_path, "Shapefiles", paste0("CenCA_cliff_projections_", scenario_name),
+              "commondata", "final_final", "Baseline.shp"),
+    file.path(scenario_path, "Shapefiles", "commondata", "final_final", "Baseline.shp"),
+    file.path(scenario_path, "Baseline.shp")
+  )
+  
+  baseline_path <- NULL
+  for (path in possible_paths) {
+    if (file.exists(path)) {
+      baseline_path <- path
+      break
+    }
+  }
+  
+  if (is.null(baseline_path)) {
+    message("  ⚠ Baseline.shp not found - have you extracted the .lpk files?")
+    return(invisible(NULL))
+  }
+  
+  message("  ✓ Found baseline shapefile")
+  
+  # Read baseline points
+  baseline <- suppressMessages(st_read(baseline_path, quiet = TRUE))
+  
+  message("  Total points: ", nrow(baseline))
+  
+  # Clip to study area
+  baseline_clip <- clip_vector_to_bbox(baseline, bbox_poly4326_expanded)
+  
+  if (nrow(baseline_clip) == 0) {
+    message("  ⚠ No points in study area")
+    return(invisible(NULL))
+  }
+  
+  message("  Points in AOI: ", nrow(baseline_clip))
+  
+  # ============================================================================
+  # CONVERT POINTS TO MULTILINESTRING WITH DISTANCE THRESHOLD
+  # Prevents shortcuts across coves/bays
+  # ============================================================================
+  
+  message("  Converting points to line (with 500m gap threshold)...")
+  
+  # Order by Y (south to north)
+  coords <- st_coordinates(baseline_clip) %>%
+    as.data.frame() %>%
+    arrange(Y)
+  
+  # Calculate distances between consecutive points
+  distances <- numeric(nrow(coords) - 1)
+  for (i in 1:(nrow(coords) - 1)) {
+    distances[i] <- sqrt((coords$X[i+1] - coords$X[i])^2 + 
+                           (coords$Y[i+1] - coords$Y[i])^2)
+  }
+  
+  # Break line where gaps > 500m (prevents shortcuts)
+  threshold <- 500
+  break_indices <- which(distances > threshold)
+  
+  # Create segments
+  segments <- list()
+  start_idx <- 1
+  
+  if (length(break_indices) > 0) {
+    for (break_idx in break_indices) {
+      segment_coords <- coords[start_idx:break_idx, ]
+      
+      if (nrow(segment_coords) >= 2) {
+        line <- st_linestring(as.matrix(segment_coords[, c("X", "Y")]))
+        segments <- append(segments, list(line))
+      }
+      
+      start_idx <- break_idx + 1
+    }
+  }
+  
+  # Add final segment
+  if (start_idx <= nrow(coords)) {
+    segment_coords <- coords[start_idx:nrow(coords), ]
+    if (nrow(segment_coords) >= 2) {
+      line <- st_linestring(as.matrix(segment_coords[, c("X", "Y")]))
+      segments <- append(segments, list(line))
+    }
+  }
+  
+  # Create MULTILINESTRING
+  baseline_final <- st_sf(
+    scenario = scenario_name,
+    threshold_m = threshold,
+    n_segments = length(segments),
+    geometry = st_sfc(st_multilinestring(segments), crs = st_crs(baseline_clip))
+  )
+  
+  # Save
+  out_name <- paste0("baseline_", tolower(gsub(" ", "", scenario_name)), "_", case_abbr, ".gpkg")
+  out_path <- file.path(cliff_out, out_name)
+  
+  suppressMessages(st_write(baseline_final, out_path, delete_dsn = TRUE, quiet = TRUE))
+  
+  message("  ✓ Saved: ", out_name)
+  message("  Geometry: MULTILINESTRING (", length(segments), " segments)")
+  message("  Total length: ", round(as.numeric(st_length(baseline_final)), 0), "m")
+  
+  invisible(NULL)
+}
+
+
+# FUNCTION: Extract baseline for SoCal (use 0.25m SLR as pseudo-baseline)
+
+process_baseline_socal <- function(scenario_name) {
+  
+  message("\n→ Creating pseudo-baseline for ", scenario_name, " (SoCal)")
+  
+  # For SoCal, use the 0.25m SLR line as baseline (no true baseline available)
+  # This should already be extracted from the main shapefile
+  
+  proj_file <- file.path(cliff_out, 
+                         paste0("CliffEdgePositions_", scenario_name, "_vFinal_", case_abbr, ".gpkg"))
+  
+  if (!file.exists(proj_file)) {
+    message("  ⚠ Projection file not found")
+    return(invisible(NULL))
+  }
+  
+  # Read and filter to 0.25m SLR
+  proj <- suppressMessages(st_read(proj_file, quiet = TRUE))
+  baseline <- proj %>% filter(grepl("0\\.25", Name))
+  
+  if (nrow(baseline) == 0) {
+    message("  ⚠ No 0.25m SLR line found")
+    return(invisible(NULL))
+  }
+  
+  # Save as baseline
+  out_name <- paste0("baseline_", tolower(gsub(" ", "", scenario_name)), "_", case_abbr, ".gpkg")
+  out_path <- file.path(cliff_out, out_name)
+  
+  suppressMessages(st_write(baseline, out_path, delete_dsn = TRUE, quiet = TRUE))
+  
+  message("  ✓ Saved: ", out_name)
+  message("  ⚠ NOTE: Using 0.25m SLR as pseudo-baseline (no true baseline available)")
+  message("           Represents ~2040-2050 conditions, not current")
+  
+  invisible(NULL)
+}
+
+
 # MAIN PROCESSING - Choose method based on data_region
 
 
@@ -296,12 +454,20 @@ if (data_region == "CenCal") {
   # Process Hold the Line (with armoring - for cost comparison)
   process_cliff_scenario_kmz(holdtheline_path, "Hold the Line")
   
+  # Extract baselines (current cliff edge)
+  process_baseline_cencal("LetItGo")
+  process_baseline_cencal("HoldTheLine")
+  
 } else if (data_region == "SoCal") {
   # Process Let It Go (natural retreat - PRIMARY for retreat analysis)
   process_cliff_scenario_shapefile(letitgo_path, "Let It Go")
   
   # Process Hold the Line (with armoring - for cost comparison)
   process_cliff_scenario_shapefile(holdtheline_path, "Hold the Line")
+  
+  # Create pseudo-baselines from 0.25m SLR
+  process_baseline_socal("LetItGo")
+  process_baseline_socal("HoldTheLine")
 }
 
 
@@ -365,4 +531,3 @@ if (length(cliff_files_saved) > 0) {
   message("\nFirst 3 rows:")
   print(head(st_drop_geometry(test_data), 3))
 }
-

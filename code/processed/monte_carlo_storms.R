@@ -247,6 +247,9 @@ calc_tstar_monte_carlo <- function(prop_id, scenario_name, cliff_scen_name,
   
   retreat_years <- numeric(n_sims)
   
+  # Store NPV damages from all simulations to calculate mean
+  npv_d_matrix <- matrix(0, nrow = n_sims, ncol = bigT)
+  
   for (sim in 1:n_sims) {
     
     # Generate stochastic storm timeline (FAST NOW!)
@@ -275,6 +278,9 @@ calc_tstar_monte_carlo <- function(prop_id, scenario_name, cliff_scen_name,
       npv_d_vec[t] <- sum(annual_damages[t:bigT] * beta_powers[1:years_remaining])
     }
     
+    # Store this simulation's NPV damages
+    npv_d_matrix[sim, ] <- npv_d_vec
+    
     # Find retreat year for this timeline (vectorized comparison)
     # NPV(staying) = NPV(net rent) - NPV(damages)
     npv_staying <- npv_r_vec - npv_d_vec
@@ -290,6 +296,9 @@ calc_tstar_monte_carlo <- function(prop_id, scenario_name, cliff_scen_name,
     
     retreat_years[sim] <- t_star
   }
+  
+  # Calculate mean NPV damages across all simulations
+  npv_d_vec_mean <- colMeans(npv_d_matrix)
   
   # ===== AGGREGATE STATISTICS =====
   
@@ -342,6 +351,9 @@ calc_tstar_monte_carlo <- function(prop_id, scenario_name, cliff_scen_name,
     mc_q95_year = tstar_q95,
     mc_range_years = tstar_q95 - tstar_q05,
     retreat_trigger = retreat_trigger,
+    npv_rent_annual = list(npv_r_vec), 
+    npv_damages_annual = list(npv_d_vec_mean),  # Use mean across simulations
+    npv_net_annual = list(npv_r_vec - npv_d_vec_mean),
     timing_category = timing_category,
     cliff_exposure_status = cliff_exposure_status,
     initial_cliff_dist_m = initial_cliff_dist

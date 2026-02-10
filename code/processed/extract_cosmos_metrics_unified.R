@@ -78,7 +78,7 @@ library(purrr)
 
 
 # CONFIGURATION
-case_name <- "stinson"  # Change for other sites
+case_name <- "carpinteria"  # Change for other sites
 data_dir <- file.path("data", case_name)
 cosmos_dir <- file.path(data_dir, "cosmos")
 derived_dir <- file.path(data_dir, "derived")
@@ -462,277 +462,276 @@ if (!exists("SKIP_AVERAGE_CONDITIONS") || !SKIP_AVERAGE_CONDITIONS) {
   
 } # End of average conditions extraction
 
-# SECTION B: CLIFF RETREAT - EXTRACT ALL SLR SCENARIOS
+# ============================================================================
+# CLIFF RETREAT HAZARDS - BASELINE-AWARE VERSION
+# ============================================================================
+# This section replaces lines ~470-735 in extract_cosmos_metrics_unified.R
+#
+# Key Changes:
+# 1. Separates BASELINE (current cliff) from PROJECTIONS (future by SLR)
+# 2. Outputs baseline_cliff_dist_m AND cliff_dist_future_m
+# 3. Prevents using future projections as baseline (the original bug)
+# ============================================================================
 
-message("\n→ CLIFF RETREAT - Extracting all SLR scenarios...")
-
+cliff_metrics <- tibble()
 cliff_dir <- file.path(cosmos_dir, "cliff_retreat")
 
-if (!dir.exists(cliff_dir)) {
-  message("  WARNING  Cliff directory not found")
-  cliff_metrics <- tibble()
-} else {
-  gpkg_files <- list.files(cliff_dir, pattern = "\\.gpkg$", full.names = TRUE)
+if (dir.exists(cliff_dir)) {
   
-  if (length(gpkg_files) == 0) {
-    message("  WARNING  No .gpkg files found")
+  message("\n", paste(rep("=", 80), collapse = ""))
+  message("CLIFF RETREAT EXTRACTION (BASELINE-AWARE)")
+  message(paste(rep("=", 80), collapse = ""))
+  
+  # Find all cliff files
+  all_files <- list.files(cliff_dir, pattern = "\\.gpkg$", full.names = TRUE)
+  
+  if (length(all_files) == 0) {
+    message("  ⚠ No cliff files found")
     cliff_metrics <- tibble()
+    
   } else {
-    message("  Found ", length(gpkg_files), " cliff file(s)")
+    message("  Found ", length(all_files), " file(s)")
     
-    # Look for BOTH management scenario files
-    letitgo_files <- gpkg_files[grepl("LetItGo", basename(gpkg_files), ignore.case = TRUE)]
-    letitgo_files <- letitgo_files[!grepl("Uncertainty", basename(letitgo_files), ignore.case = TRUE)]
+    # Separate baseline and projection files
+    baseline_files <- grep("baseline_", all_files, value = TRUE, ignore.case = TRUE)
+    projection_files <- grep("projection.*lines|CliffEdge", all_files, value = TRUE, ignore.case = TRUE)
+    projection_files <- projection_files[!grepl("baseline", projection_files, ignore.case = TRUE)]
     
-    holdtheline_files <- gpkg_files[grepl("HoldTheLine", basename(gpkg_files), ignore.case = TRUE)]
-    holdtheline_files <- holdtheline_files[!grepl("Uncertainty", basename(holdtheline_files), ignore.case = TRUE)]
+    message("\n  Baseline files: ", length(baseline_files))
+    for (f in baseline_files) message("    - ", basename(f))
     
-    # Combine both scenarios for processing
-    all_scenario_files <- c(letitgo_files, holdtheline_files)
+    message("\n  Projection files: ", length(projection_files))
+    for (f in projection_files) message("    - ", basename(f))
     
-    if (length(all_scenario_files) == 0) {
-      message("  WARNING  No management scenario files found (LetItGo or HoldTheLine)")
-      message("  Available files:")
-      for (f in basename(gpkg_files)) {
-        message("    - ", f)
-      }
-      cliff_metrics <- tibble()
-    } else {
+    # ========================================================================
+    # STEP 1: EXTRACT BASELINE (current cliff edge)
+    # ========================================================================
+    
+    baseline_list <- list()
+    
+    if (length(baseline_files) > 0) {
+      message("\n  EXTRACTING BASELINES (current cliff edge)")
+      message("  ", paste(rep("-", 78), collapse = ""))
       
-      message("  Found ", length(letitgo_files), " LetItGo file(s)")
-      message("  Found ", length(holdtheline_files), " HoldTheLine file(s)")
-      
-      cliff_list <- list()  # Will store tibbles for each SLR scenario × management scenario
-      
-      # Process each management scenario file
-      for (cliff_file in all_scenario_files) {
-        
-        # Determine which management scenario this file represents
-        scenario_name <- if (grepl("LetItGo", basename(cliff_file), ignore.case = TRUE)) {
+      for (bfile in baseline_files) {
+        # Identify scenario
+        scenario <- if (grepl("letitgo", basename(bfile), ignore.case = TRUE)) {
           "LetItGo"
-        } else if (grepl("HoldTheLine", basename(cliff_file), ignore.case = TRUE)) {
-          "HoldTheLine"  
+        } else if (grepl("holdtheline", basename(bfile), ignore.case = TRUE)) {
+          "HoldTheLine"
         } else {
-          "Unknown"
+          "unknown"
         }
         
-        message("\n  Processing: ", basename(cliff_file), " [", scenario_name, "]")
+        message("\n    ", basename(bfile), " [", scenario, "]")
         
         tryCatch({
-          cliff_data <- st_read(cliff_file, quiet = TRUE)
-          message("    Features: ", nrow(cliff_data))
-          message("    Columns: ", paste(names(cliff_data), collapse = ", "))
+          baseline <- st_read(bfile, quiet = TRUE)
+          message("      Geometry: ", as.character(st_geometry_type(baseline, by_geometry = FALSE)))
           
+          # Calculate distance to current cliff
+          parcels_proj <- st_transform(parcels, st_crs(baseline))
+          distances <- st_distance(parcels_proj, baseline)
+          baseline_dist_m <- as.numeric(apply(distances, 1, min))
           
-          # STRATEGY 1: SoCal format - SLR encoded in Name field as text
+          baseline_list[[length(baseline_list) + 1]] <- tibble(
+            parcel_id = parcels$parcel_id,
+            baseline_cliff_dist_m = baseline_dist_m,
+            scenario = scenario
+          )
           
-          # Format: "Cliff position, 0.25 m SLR" or similar
+          message("      ✓ Parcels < 100m: ", sum(baseline_dist_m < 100))
           
-          if ("Name" %in% names(cliff_data)) {
-            message("    Detected SoCal format (SLR in Name field)")
+        }, error = function(e) {
+          message("      ✗ Error: ", e$message)
+        })
+      }
+    }
+    
+    # ========================================================================
+    # STEP 2: EXTRACT PROJECTIONS (future cliff by SLR)
+    # ========================================================================
+    
+    projection_list <- list()
+    
+    if (length(projection_files) > 0) {
+      message("\n  EXTRACTING PROJECTIONS (future cliff positions)")
+      message("  ", paste(rep("-", 78), collapse = ""))
+      
+      for (pfile in projection_files) {
+        # Identify scenario
+        scenario <- if (grepl("letitgo", basename(pfile), ignore.case = TRUE)) {
+          "LetItGo"
+        } else if (grepl("holdtheline", basename(pfile), ignore.case = TRUE)) {
+          "HoldTheLine"
+        } else {
+          "unknown"
+        }
+        
+        message("\n    ", basename(pfile), " [", scenario, "]")
+        
+        tryCatch({
+          projections <- st_read(pfile, quiet = TRUE)
+          message("      Features: ", nrow(projections))
+          message("      Fields: ", paste(head(names(projections), 5), collapse = ", "))
+          
+          # Parse SLR from Name field
+          if ("Name" %in% names(projections)) {
             
-            # Show sample Names
-            sample_names <- head(unique(cliff_data$Name), 3)
-            message("    Sample Names: ", paste(sample_names, collapse = " | "))
+            # Try numeric (CenCal format: 25, 50, 100 = cm)
+            name_num <- suppressWarnings(as.numeric(projections$Name))
             
-            # Extract SLR values from Name field
-            # Pattern matches: "X.XX m" or "X.X m" or "X m"
-            cliff_data$slr_m_parsed <- NA_real_
-            
-            for (i in 1:nrow(cliff_data)) {
-              name_str <- as.character(cliff_data$Name[i])
+            if (any(!is.na(name_num))) {
+              # CenCal format
+              slr_cm <- unique(name_num[!is.na(name_num)])
+              slr_m <- slr_cm / 100
+              message("      Format: CenCal (cm)")
+              message("      SLR: ", paste(sort(slr_cm), collapse = ", "), " cm")
               
-              # Try to extract number before "m SLR" or "m slr"
-              # Matches patterns like "0.25 m SLR", "1.0 m SLR", "2 m SLR"
-              matches <- str_match(name_str, "([0-9]+\\.?[0-9]*) ?m")
-              
-              if (!is.na(matches[1, 2])) {
-                cliff_data$slr_m_parsed[i] <- as.numeric(matches[1, 2])
-              }
-            }
-            
-            # Check if parsing succeeded
-            parsed_slr <- unique(cliff_data$slr_m_parsed[!is.na(cliff_data$slr_m_parsed)])
-            
-            if (length(parsed_slr) > 0) {
-              message("    Parsed SLR scenarios (m): ", paste(sort(parsed_slr), collapse = ", "))
-              
-              # Extract distances for each SLR scenario
-              for (slr_val in sort(parsed_slr)) {
-                # Get features for this SLR level
-                cliff_subset <- cliff_data %>% filter(slr_m_parsed == slr_val)
+              for (i in seq_along(slr_cm)) {
+                subset <- projections %>% filter(as.numeric(Name) == slr_cm[i])
                 
-                if (nrow(cliff_subset) > 0) {
-                  # Transform parcels to match cliff data CRS
-                  parcels_proj <- st_transform(parcels, st_crs(cliff_subset))
+                if (nrow(subset) > 0) {
+                  parcels_proj <- st_transform(parcels, st_crs(subset))
+                  distances <- st_distance(parcels_proj, subset)
+                  dist_m <- as.numeric(apply(distances, 1, min))
                   
-                  # Calculate minimum distance from each parcel to cliff lines
-                  distances <- st_distance(parcels_proj, cliff_subset)
-                  min_dist_m <- as.numeric(apply(distances, 1, min))
-                  
-                  # Store results
-                  cliff_list[[length(cliff_list) + 1]] <- tibble(
+                  projection_list[[length(projection_list) + 1]] <- tibble(
                     parcel_id = parcels$parcel_id,
-                    slr_m = slr_val,
-                    cliff_dist_m = min_dist_m,
-                    scenario = scenario_name
+                    slr_m = slr_m[i],
+                    cliff_dist_future_m = dist_m,
+                    scenario = scenario
                   )
                   
-                  message("      ✓ SLR = ", slr_val, " m: ", 
-                          sum(min_dist_m < 100), " parcels within 100m")
+                  message("        SLR ", sprintf("%.2f", slr_m[i]), "m: ", sum(dist_m < 100), " parcels")
                 }
               }
               
             } else {
-              message("    WARNING  Could not parse SLR values from Name field using SoCal pattern")
-              message("    Trying CenCal format (numeric Name field)...")
-              
-              # Fall back to STRATEGY 3: Try numeric interpretation
-              name_numeric <- suppressWarnings(as.numeric(cliff_data$Name))
-              
-              if (any(!is.na(name_numeric))) {
-                message("    Successfully detected CenCal format (numeric Name field)")
-                
-                slr_cm_values <- unique(name_numeric[!is.na(name_numeric)])
-                slr_m_values <- slr_cm_values / 100
-                
-                message("    Found SLR scenarios (cm): ", paste(sort(slr_cm_values), collapse = ", "))
-                
-                # Extract for each SLR scenario
-                for (i in seq_along(slr_cm_values)) {
-                  slr_cm <- slr_cm_values[i]
-                  slr_m <- slr_m_values[i]
-                  
-                  cliff_subset <- cliff_data %>% 
-                    filter(!is.na(suppressWarnings(as.numeric(Name)))) %>%
-                    filter(suppressWarnings(as.numeric(Name)) == slr_cm)
-                  
-                  if (nrow(cliff_subset) > 0) {
-                    parcels_proj <- st_transform(parcels, st_crs(cliff_subset))
-                    distances <- st_distance(parcels_proj, cliff_subset)
-                    min_dist_m <- as.numeric(apply(distances, 1, min))
-                    
-                    cliff_list[[length(cliff_list) + 1]] <- tibble(
-                      parcel_id = parcels$parcel_id,
-                      slr_m = slr_m,
-                      cliff_dist_m = min_dist_m,
-                      scenario = scenario_name
-                    )
-                    
-                    message("      ✓ SLR = ", slr_m, " m: ", 
-                            sum(min_dist_m < 100), " parcels within 100m")
-                  }
+              # SoCal format ("0.25 m SLR")
+              projections$slr_parsed <- NA_real_
+              for (j in 1:nrow(projections)) {
+                matches <- str_match(as.character(projections$Name[j]), "([0-9]+\\.?[0-9]*) ?m")
+                if (!is.na(matches[1, 2])) {
+                  projections$slr_parsed[j] <- as.numeric(matches[1, 2])
                 }
-              } else {
-                message("    ERROR  Could not parse Name field as numeric either")
-                message("    Name field values:")
-                print(head(cliff_data$Name, 5))
               }
-            }
-            
-            
-            # STRATEGY 2: Files with explicit SLR_cm or SLR fields
-          } else if (any(c("SLR_cm", "SLR", "slr_cm", "slr") %in% names(cliff_data))) {
-            
-            message("    Detected explicit SLR field")
-            
-            # Find the SLR field
-            slr_field <- NA
-            for (field in c("SLR_cm", "SLR", "slr_cm", "slr")) {
-              if (field %in% names(cliff_data)) {
-                slr_field <- field
-                break
-              }
-            }
-            
-            # Get unique SLR values
-            slr_values <- unique(cliff_data[[slr_field]])
-            slr_values <- slr_values[!is.na(slr_values)]
-            
-            # Determine if values are in cm or m
-            if (all(slr_values >= 10)) {
-              # Values in cm
-              slr_m_values <- slr_values / 100
-              message("    Found SLR scenarios (cm): ", paste(sort(slr_values), collapse = ", "))
-            } else {
-              # Values already in m
-              slr_m_values <- slr_values
-              message("    Found SLR scenarios (m): ", paste(sort(slr_values), collapse = ", "))
-            }
-            
-            # Extract for each SLR scenario
-            for (i in seq_along(slr_values)) {
-              slr_val <- slr_values[i]
-              slr_m <- slr_m_values[i]
               
-              cliff_subset <- cliff_data %>% filter(.data[[slr_field]] == slr_val)
+              slr_vals <- unique(projections$slr_parsed[!is.na(projections$slr_parsed)])
+              message("      Format: SoCal (text)")
+              message("      SLR: ", paste(sort(slr_vals), collapse = ", "), " m")
               
-              if (nrow(cliff_subset) > 0) {
-                parcels_proj <- st_transform(parcels, st_crs(cliff_subset))
-                distances <- st_distance(parcels_proj, cliff_subset)
-                min_dist_m <- as.numeric(apply(distances, 1, min))
+              for (slr_val in slr_vals) {
+                subset <- projections %>% filter(slr_parsed == slr_val)
                 
-                cliff_list[[length(cliff_list) + 1]] <- tibble(
-                  parcel_id = parcels$parcel_id,
-                  slr_m = slr_m,
-                  cliff_dist_m = min_dist_m,
-                  scenario = scenario_name
-                )
-                
-                message("      ✓ SLR = ", slr_m, " m: ", 
-                        sum(min_dist_m < 100), " parcels within 100m")
+                if (nrow(subset) > 0) {
+                  parcels_proj <- st_transform(parcels, st_crs(subset))
+                  distances <- st_distance(parcels_proj, subset)
+                  dist_m <- as.numeric(apply(distances, 1, min))
+                  
+                  projection_list[[length(projection_list) + 1]] <- tibble(
+                    parcel_id = parcels$parcel_id,
+                    slr_m = slr_val,
+                    cliff_dist_future_m = dist_m,
+                    scenario = scenario
+                  )
+                  
+                  message("        SLR ", sprintf("%.2f", slr_val), "m: ", sum(dist_m < 100), " parcels")
+                }
               }
             }
-            
-          } else {
-            message("    WARNING  Cannot identify SLR encoding format")
-            message("    Available fields: ", paste(names(cliff_data), collapse = ", "))
           }
           
         }, error = function(e) {
-          message("    ERROR  ", e$message)
+          message("      ✗ Error: ", e$message)
         })
       }
+    }
+    
+    # ========================================================================
+    # STEP 3: COMBINE BASELINE + PROJECTIONS + DETECT PASSTHROUGH
+    # ========================================================================
+    
+    if (length(baseline_list) > 0 && length(projection_list) > 0) {
+      message("\n  COMBINING baseline + projections")
       
-      # --------------------------------------------------------------------
-      # Combine all SLR scenarios
-      # --------------------------------------------------------------------
+      baselines_df <- bind_rows(baseline_list)
+      projections_df <- bind_rows(projection_list)
       
-      if (length(cliff_list) > 0) {
-        cliff_metrics <- bind_rows(cliff_list) %>%
-          arrange(parcel_id, slr_m)
-        
-        # Add exposure flags based on California Coastal Commission setback guidelines
-        cliff_metrics <- cliff_metrics %>%
-          mutate(
-            cliff_exposed_10m = cliff_dist_m < 10,   # Immediate danger - evacuate
-            cliff_exposed_25m = cliff_dist_m < 25,   # Planned retreat - remove within 5-10 yrs
-            cliff_exposed_50m = cliff_dist_m < 50,   # Warning zone - start planning
-            cliff_exposed_100m = cliff_dist_m < 100  # Watch zone - long-term monitoring
-          )
-        
-        message("\n  CLIFF EXTRACTION COMPLETE")
-        message("    Total rows: ", nrow(cliff_metrics))
-        message("    Parcels: ", n_distinct(cliff_metrics$parcel_id))
-        message("    Management scenarios: ", paste(sort(unique(cliff_metrics$scenario)), collapse = ", "))
-        message("    SLR scenarios: ", paste(sort(unique(cliff_metrics$slr_m)), collapse = ", "), " m")
-        message("\n  Exposure thresholds (ever reached across all SLR scenarios):")
-        message("    Properties within 10m (IMMEDIATE):  ", 
-                n_distinct(cliff_metrics$parcel_id[cliff_metrics$cliff_exposed_10m]))
-        message("    Properties within 25m (RETREAT):    ", 
-                n_distinct(cliff_metrics$parcel_id[cliff_metrics$cliff_exposed_25m]))
-        message("    Properties within 50m (WARNING):    ", 
-                n_distinct(cliff_metrics$parcel_id[cliff_metrics$cliff_exposed_50m]))
-        message("    Properties within 100m (WATCH):     ", 
-                n_distinct(cliff_metrics$parcel_id[cliff_metrics$cliff_exposed_100m]))
-        
-      } else {
-        message("\n  WARNING  Could not extract cliff data from any files")
-        cliff_metrics <- tibble()
+      # Merge: baseline is constant for each scenario
+      cliff_metrics <- projections_df %>%
+        left_join(baselines_df, by = c("parcel_id", "scenario"))
+      
+      # ======================================================================
+      # DETECT CLIFF PASSTHROUGH
+      # When cliff retreats THROUGH a property, distance can increase
+      # (cliff goes from west side to east side)
+      # ======================================================================
+      
+      message("  Detecting cliff passthrough cases...")
+      
+      cliff_metrics <- cliff_metrics %>%
+        mutate(
+          # Passthrough detection: future dist > baseline dist (unexpected)
+          # AND baseline was close (within 100m - in retreat zone)
+          # Threshold: 5m increase suggests cliff passed through
+          cliff_passthrough = (cliff_dist_future_m > baseline_cliff_dist_m + 5) &
+            (baseline_cliff_dist_m < 100),
+          
+          # For passthrough: property is destroyed, set distance to 0
+          cliff_dist_adjusted = if_else(cliff_passthrough, 0, cliff_dist_future_m)
+        )
+      
+      n_passthrough <- sum(cliff_metrics$cliff_passthrough, na.rm = TRUE)
+      n_parcels_passthrough <- n_distinct(cliff_metrics$parcel_id[cliff_metrics$cliff_passthrough])
+      
+      if (n_passthrough > 0) {
+        message("  ⚠ Found ", n_passthrough, " cases where cliff passed through parcel")
+        message("    Affecting ", n_parcels_passthrough, " unique parcel(s)")
+        message("    Setting cliff_dist_adjusted = 0 for these cases")
       }
+      
+      # Add exposure flags (using ADJUSTED distance for passthrough cases)
+      cliff_metrics <- cliff_metrics %>%
+        mutate(
+          baseline_exposed_10m = baseline_cliff_dist_m < 10,
+          baseline_exposed_25m = baseline_cliff_dist_m < 25,
+          baseline_exposed_50m = baseline_cliff_dist_m < 50,
+          baseline_exposed_100m = baseline_cliff_dist_m < 100,
+          
+          # Future exposure uses ADJUSTED distance (0 if passthrough)
+          cliff_exposed_10m = cliff_dist_adjusted < 10,
+          cliff_exposed_25m = cliff_dist_adjusted < 25,
+          cliff_exposed_50m = cliff_dist_adjusted < 50,
+          cliff_exposed_100m = cliff_dist_adjusted < 100,
+          
+          # Special flag: property destroyed by cliff
+          cliff_destroyed = cliff_passthrough
+        )
+      
+      message("\n  ✓ CLIFF EXTRACTION COMPLETE")
+      message("    Rows: ", nrow(cliff_metrics))
+      message("    Parcels: ", n_distinct(cliff_metrics$parcel_id))
+      message("    Scenarios: ", paste(unique(cliff_metrics$scenario), collapse = ", "))
+      message("    SLR range: ", min(cliff_metrics$slr_m), "-", max(cliff_metrics$slr_m), " m")
+      
+      message("\n  Current exposure (baseline):")
+      message("    < 10m: ", n_distinct(cliff_metrics$parcel_id[cliff_metrics$baseline_exposed_10m]))
+      message("    < 25m: ", n_distinct(cliff_metrics$parcel_id[cliff_metrics$baseline_exposed_25m]))
+      message("    < 50m: ", n_distinct(cliff_metrics$parcel_id[cliff_metrics$baseline_exposed_50m]))
+      message("    < 100m: ", n_distinct(cliff_metrics$parcel_id[cliff_metrics$baseline_exposed_100m]))
+      
+      message("\n  Future exposure (accounting for passthrough):")
+      message("    Destroyed: ", n_distinct(cliff_metrics$parcel_id[cliff_metrics$cliff_destroyed]))
+      
+    } else {
+      message("\n  ⚠ Cannot combine - missing baseline or projection data")
+      cliff_metrics <- tibble()
     }
   }
 }
+
+# End of cliff extraction section
 
 # FINAL MERGE AND SAVE
 
@@ -816,6 +815,12 @@ parcels_clean <- parcels %>%
 
 final_output <- base_grid %>%
   left_join(parcels_clean, by = "parcel_id")
+
+# for next scripts cliff_dist_m = cliff_dist_adjusted
+if ("cliff_dist_adjusted" %in% names(final_output)) {
+  final_output <- final_output %>%
+    mutate(cliff_dist_m = cliff_dist_adjusted)
+}
 
 # Save
 output_path <- file.path(derived_dir, "cosmos_hazard_metrics.csv")

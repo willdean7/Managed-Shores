@@ -27,32 +27,63 @@ library(jsonlite)
 
 
 # DATA LOADING
-
 # Configuration
-CASE_NAME <- "king_salmon"  # Change to isla_vista, pacifica as needed
+CASE_NAME <- "pacifica"  # Change to isla_vista, pacifica as needed
 DATA_DIR <- file.path("data", CASE_NAME)
 DERIVED_DIR <- file.path(DATA_DIR, "derived")
 
-# Load baseline results
-baseline_results <- read_csv(
-  file.path(DERIVED_DIR, "retreat_schedule_baseline.csv"),
-  show_col_types = FALSE
-)
+# ==============================================================================
+# LOAD DATA - Handle both RDS and CSV formats
+# ==============================================================================
+
+# Try to load RDS first (preferred - has list columns intact)
+rds_baseline <- file.path(DERIVED_DIR, "retreat_schedule_baseline.rds")
+rds_sensitivity <- file.path(DERIVED_DIR, "retreat_schedule_sensitivity.rds")
+
+if (file.exists(rds_baseline)) {
+  message("Loading baseline from RDS (preserves list columns)")
+  baseline_results <- readRDS(rds_baseline)
+} else {
+  message("Loading baseline from CSV")
+  baseline_results <- read_csv(
+    file.path(DERIVED_DIR, "retreat_schedule_baseline.csv"),
+    show_col_types = FALSE
+  )
+  
+  # Drop the *_str columns that can't be used in Shiny
+  # (NPV plot calculates these on-the-fly anyway)
+  baseline_results <- baseline_results %>%
+    select(-matches("_str$"))
+}
 
 # Load sensitivity results (if available)
-sensitivity_file <- file.path(DERIVED_DIR, "retreat_schedule_sensitivity.csv")
-if (file.exists(sensitivity_file)) {
-  sensitivity_results <- read_csv(sensitivity_file, show_col_types = FALSE)
-  
+if (file.exists(rds_sensitivity)) {
+  message("Loading sensitivity from RDS")
+  sensitivity_results <- readRDS(rds_sensitivity)
+  has_sensitivity <- TRUE
+} else {
+  sensitivity_file <- file.path(DERIVED_DIR, "retreat_schedule_sensitivity.csv")
+  if (file.exists(sensitivity_file)) {
+    message("Loading sensitivity from CSV")
+    sensitivity_results <- read_csv(sensitivity_file, show_col_types = FALSE)
+    # Drop *_str columns
+    sensitivity_results <- sensitivity_results %>%
+      select(-matches("_str$"))
+    has_sensitivity <- TRUE
+  } else {
+    has_sensitivity <- FALSE
+  }
+}
+
+# Combine baseline and sensitivity
+if (has_sensitivity) {
   # Add result_type indicator
   baseline_results <- baseline_results %>% mutate(result_type = "baseline")
   sensitivity_results <- sensitivity_results %>% mutate(result_type = "sensitivity")
   
   all_results <- bind_rows(baseline_results, sensitivity_results)
-  has_sensitivity <- TRUE
 } else {
   all_results <- baseline_results %>% mutate(result_type = "baseline")
-  has_sensitivity <- FALSE
 }
 
 # Load Monte Carlo distributions (if available)
@@ -93,49 +124,85 @@ scenarios <- scenario_order[scenario_order %in% scenarios_raw]
 #Function to calculate NPV components for a single property
 calculate_npv_components_property <- function(parcel_id, scenario, hazards_data, baseline_data, bigT = 75) {
   
-  # Get property parameters
-  prop_params <- baseline_data %>%
-    filter(parcel_id == !!parcel_id, scenario == !!scenario) %>%
-    slice(1)
-  
-  if (nrow(prop_params) == 0) return(NULL)
-  
-  rent <- prop_params$rent
-  discount_rate <- prop_params$discount_rate
-  damage_threshold <- prop_params$damage_threshold
-  strval <- prop_params$strval
-  beta <- 1 / (1 + discount_rate)
-  
-  # Depth-damage params
-  depth_params <- c(a = 0.4, b = 1, d = 2)
-  
-  # Get flood timeline
-  flood_timeline <- hazards_data %>%
-    filter(parcel_id == !!parcel_id, scenario == !!scenario) %>%
-    arrange(year) %>%
-    mutate(
-      depth_clean = if_else(depth_m >= damage_threshold, depth_m, 0),
-      damage_frac = depth_params["a"] / (1 + exp(-depth_params["b"] * (depth_clean - depth_params["d"]))),
-      damage_frac = pmax(damage_frac, 0),
-      annual_damage = damage_frac * strval
+  tryCatch({
+    # Get property parameters
+    prop_params <- baseline_data %>%
+      filter(parcel_id == !!parcel_id, scenario == !!scenario) %>%
+      slice(1)
+    
+    if (nrow(prop_params) == 0) {
+      message("No property found: parcel_id=", parcel_id, ", scenario=", scenario)
+      return(NULL)
+    }
+    
+    rent <- prop_params$rent
+    discount_rate <- prop_params$discount_rate
+    damage_threshold <- prop_params$damage_threshold
+    strval <- prop_params$strval
+    
+    if (any(is.na(c(rent, discount_rate, damage_threshold, strval)))) {
+      message("Missing parameters for parcel ", parcel_id)
+      return(NULL)
+    }
+    
+    beta <- 1 / (1 + discount_rate)
+    depth_params <- c(a = 0.4, b = 1, d = 2)
+    
+    # Get flood timeline - THIS IS KEY: years in data are 0-74
+    flood_timeline <- hazards_data %>%
+      filter(parcel_id == !!parcel_id, scenario == !!scenario) %>%
+      arrange(year) %>%
+      mutate(
+        depth_clean = if_else(depth_m >= damage_threshold, depth_m, 0),
+        damage_frac = depth_params["a"] / (1 + exp(-depth_params["b"] * (depth_clean - depth_params["d"]))),
+        damage_frac = pmax(damage_frac, 0),
+        annual_damage = damage_frac * strval
+      )
+    
+    if (nrow(flood_timeline) == 0) {
+      message("No hazards data for parcel ", parcel_id, ", scenario=", scenario)
+      return(NULL)
+    }
+    
+    n_years <- min(bigT, nrow(flood_timeline))
+    beta_powers <- beta^(1:n_years)
+    
+    # Calculate NPV vectors - MATCHES MAIN SCRIPT LOGIC
+    # npv_r_vec[t] = NPV of rent from year t onwards
+    # npv_d_vec[t] = NPV of damages from year t onwards
+    
+    npv_r_vec <- numeric(n_years)
+    npv_d_vec <- numeric(n_years)
+    
+    for (t in 1:n_years) {
+      years_remaining <- n_years - t + 1
+      
+      # NPV of rent from year t onwards
+      npv_r_vec[t] <- rent * sum(beta_powers[1:years_remaining])
+      
+      # NPV of damages from year t onwards
+      if (t <= nrow(flood_timeline)) {
+        end_idx <- min(nrow(flood_timeline), n_years)
+        damage_vals <- flood_timeline$annual_damage[t:end_idx]
+        npv_d_vec[t] <- sum(damage_vals * beta_powers[1:length(damage_vals)])
+      }
+    }
+    
+    # Create output with year labels 1-75
+    npv_data <- tibble(
+      year = 1:n_years,
+      npv_rent = npv_r_vec,
+      npv_damage = npv_d_vec,
+      npv_net = npv_r_vec - npv_d_vec
     )
-  
-  if (nrow(flood_timeline) == 0) return(NULL)
-  
-  # Calculate NPV components from each year forward
-  npv_data <- tibble(year = 1:min(bigT, nrow(flood_timeline))) %>%
-    mutate(
-      npv_rent = map_dbl(year, function(t) {
-        years_remaining <- bigT - t + 1
-        rent * sum(beta^(1:years_remaining))
-      }),
-      npv_damage = map_dbl(year, function(t) {
-        years_remaining <- bigT - t + 1
-        sum(flood_timeline$annual_damage[t:bigT] * beta^(1:years_remaining))
-      })
-    )
-  
-  return(npv_data)
+    
+    return(npv_data)
+    
+  }, error = function(e) {
+    message("Error calculating NPV: ", e$message)
+    message("  parcel_id=", parcel_id, ", scenario=", scenario)
+    return(NULL)
+  })
 }
 # Extract cliff scenario options (for cliff-only sites)
 cliff_scenarios_raw <- unique(all_results$cliff_scenario) %>% na.omit()
@@ -147,59 +214,10 @@ cliff_scenarios <- if(length(cliff_scenarios_raw) > 0) {
 has_cliff_scenarios <- !is.null(cliff_scenarios) && length(cliff_scenarios) > 1
 
 # Check for government economics columns
-has_gov_econ <- all(c("gov_net_cost", "gov_outcome", "gov_rent_collected", "gov_land_recovered") %in% names(baseline_results))
+has_gov_econ <- all(c("gov_net_cost", "gov_outcome", "gov_rent_collected") %in% names(baseline_results))
 has_buyout_cap <- "buyout_capped" %in% names(baseline_results)
 
-# =============================================================================
-# HELPER FUNCTION: Calculate NPV components for property
-# =============================================================================
 
-calculate_npv_components_property <- function(parcel_id, scenario, hazards_data, baseline_data, bigT = 75) {
-  
-  # Get property parameters
-  prop_params <- baseline_data %>%
-    filter(parcel_id == !!parcel_id, scenario == !!scenario) %>%
-    slice(1)
-  
-  if (nrow(prop_params) == 0) return(NULL)
-  
-  rent <- prop_params$rent
-  discount_rate <- prop_params$discount_rate
-  damage_threshold <- prop_params$damage_threshold
-  strval <- prop_params$strval
-  beta <- 1 / (1 + discount_rate)
-  
-  # Depth-damage params
-  depth_params <- c(a = 0.4, b = 1, d = 2)
-  
-  # Get flood timeline
-  flood_timeline <- hazards_data %>%
-    filter(parcel_id == !!parcel_id, scenario == !!scenario) %>%
-    arrange(year) %>%
-    mutate(
-      depth_clean = if_else(depth_m >= damage_threshold, depth_m, 0),
-      damage_frac = depth_params["a"] / (1 + exp(-depth_params["b"] * (depth_clean - depth_params["d"]))),
-      damage_frac = pmax(damage_frac, 0),
-      annual_damage = damage_frac * strval
-    )
-  
-  if (nrow(flood_timeline) == 0) return(NULL)
-  
-  # Calculate NPV components from each year forward
-  npv_data <- tibble(year = 1:min(bigT, nrow(flood_timeline))) %>%
-    mutate(
-      npv_rent = map_dbl(year, function(t) {
-        years_remaining <- bigT - t + 1
-        rent * sum(beta^(1:years_remaining))
-      }),
-      npv_damage = map_dbl(year, function(t) {
-        years_remaining <- bigT - t + 1
-        sum(flood_timeline$annual_damage[t:bigT] * beta^(1:years_remaining))
-      })
-    )
-  
-  return(npv_data)
-}
 
 # =============================================================================
 # UI
@@ -333,9 +351,8 @@ ui <- dashboardPage(
         ),
         
         fluidRow(
-          valueBoxOutput("rent_collected_box", width = 4),
-          valueBoxOutput("land_recovered_box", width = 4),
-          valueBoxOutput("props_capped_box", width = 4)
+          valueBoxOutput("rent_collected_box", width = 6),
+          valueBoxOutput("props_capped_box", width = 6)
         ),
         
         # Government economics breakdown
@@ -742,12 +759,12 @@ server <- function(input, output, session) {
     } else {
       df <- filtered_data() %>% filter(!is.na(buyout_price))
       rent <- sum(df$gov_rent_collected, na.rm = TRUE)
-      land <- sum(df$gov_land_recovered, na.rm = TRUE)
-      total <- rent + land
+      # Land has no value at T* (removed from model)
+      total <- rent
       
       valueBox(
         paste0("$", round(total / 1e6, 1), "M"),
-        "Total Revenue (Rent + Land)",
+        "Total Revenue (Rent Only)",
         icon = icon("coins"),
         color = "green"
       )
@@ -824,21 +841,7 @@ server <- function(input, output, session) {
     }
   })
   
-  output$land_recovered_box <- renderValueBox({
-    if (!has_gov_econ) {
-      valueBox("N/A", "Data not available", icon = icon("question"), color = "red")
-    } else {
-      df <- filtered_data() %>% filter(!is.na(buyout_price))
-      land <- sum(df$gov_land_recovered, na.rm = TRUE)
-      
-      valueBox(
-        paste0("$", round(land / 1e6, 1), "M"),
-        "Land Recovered",
-        icon = icon("landmark"),
-        color = "purple"
-      )
-    }
-  })
+  # Land recovered box removed - land has no value at T* in updated model
   
   output$props_capped_box <- renderValueBox({
     if (!has_buyout_cap) {
@@ -865,13 +868,13 @@ server <- function(input, output, session) {
       
       buyout_total <- sum(df$buyout_price, na.rm = TRUE) / 1e6
       rent_total <- sum(df$gov_rent_collected, na.rm = TRUE) / 1e6
-      land_total <- sum(df$gov_land_recovered, na.rm = TRUE) / 1e6
+      # Land has no value at T* (removed from model)
       net_total <- sum(df$gov_net_cost, na.rm = TRUE) / 1e6
       
       data <- data.frame(
-        category = c("Buyout Paid", "Rent Collected", "Land Recovered", "Net Cost/Profit"),
-        value = c(-buyout_total, rent_total, land_total, -net_total),
-        type = c("cost", "revenue", "revenue", if(net_total < 0) "profit" else "cost")
+        category = c("Buyout Paid", "Rent Collected", "Net Cost/Profit"),
+        value = c(-buyout_total, rent_total, -net_total),
+        type = c("cost", "revenue", if(net_total < 0) "profit" else "cost")
       )
       
       colors <- c("cost" = "#e74c3c", "revenue" = "#3498db", "profit" = "#2ecc71")
@@ -1186,7 +1189,7 @@ server <- function(input, output, session) {
           summarise(
             buyout = sum(buyout_price, na.rm = TRUE) / 1e6,
             rent = sum(gov_rent_collected, na.rm = TRUE) / 1e6,
-            land = sum(gov_land_recovered, na.rm = TRUE) / 1e6,
+            # Land has no value at T* (removed from model)
             net = sum(gov_net_cost, na.rm = TRUE) / 1e6,
             .groups = "drop"
           ) %>%
@@ -1210,8 +1213,6 @@ server <- function(input, output, session) {
                     marker = list(color = "#e74c3c")) %>%
           add_trace(y = ~rent, name = "Rent (revenue)", type = "bar",
                     marker = list(color = "#3498db")) %>%
-          add_trace(y = ~land, name = "Land (revenue)", type = "bar",
-                    marker = list(color = "#9b59b6")) %>%
           add_trace(y = ~-net, name = "Net Profit", type = "scatter", mode = "lines+markers",
                     line = list(color = "#2ecc71", width = 3),
                     marker = list(size = 10)) %>%
@@ -1233,7 +1234,7 @@ server <- function(input, output, session) {
           summarise(
             buyout = sum(buyout_price, na.rm = TRUE) / 1e6,
             rent = sum(gov_rent_collected, na.rm = TRUE) / 1e6,
-            land = sum(gov_land_recovered, na.rm = TRUE) / 1e6,
+            # Land has no value at T* (removed from model)
             net = sum(gov_net_cost, na.rm = TRUE) / 1e6,
             .groups = "drop"
           ) %>%
@@ -1245,8 +1246,6 @@ server <- function(input, output, session) {
                     marker = list(color = "#e74c3c")) %>%
           add_trace(y = ~rent, name = "Rent (revenue)", type = "bar",
                     marker = list(color = "#3498db")) %>%
-          add_trace(y = ~land, name = "Land (revenue)", type = "bar",
-                    marker = list(color = "#9b59b6")) %>%
           add_trace(y = ~-net, name = "Net Profit", type = "scatter", mode = "lines+markers",
                     line = list(color = "#2ecc71", width = 3),
                     marker = list(size = 10)) %>%
@@ -1591,7 +1590,6 @@ server <- function(input, output, session) {
           "<ul>",
           "<li>Buyout: $", format(round(prop$buyout_price), big.mark = ","), "</li>",
           "<li>Rent NPV: $", format(round(prop$gov_rent_collected), big.mark = ","), "</li>",
-          "<li>Land: $", format(round(prop$gov_land_recovered), big.mark = ","), "</li>",
           "<li>Gov Net: $", format(round(prop$gov_net_cost), big.mark = ","), "</li>",
           "<li>Outcome: <strong>", prop$gov_outcome, "</strong></li>",
           "</ul>"
@@ -1689,3 +1687,4 @@ server <- function(input, output, session) {
 
 # RUN APP
 shinyApp(ui, server)
+
