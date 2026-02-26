@@ -28,7 +28,7 @@ library(jsonlite)
 
 # DATA LOADING
 # Configuration
-CASE_NAME <- "pacifica"  # Change to isla_vista, pacifica as needed
+CASE_NAME <- "stinson"  # Change to isla_vista, pacifica as needed
 DATA_DIR <- file.path("data", CASE_NAME)
 DERIVED_DIR <- file.path(DATA_DIR, "derived")
 
@@ -87,12 +87,15 @@ if (has_sensitivity) {
 }
 
 # Load Monte Carlo distributions (if available)
-mc_file <- file.path(DERIVED_DIR, "mc_distributions_baseline.csv")
+# NOTE: This requires T* distribution data (retreat_year per simulation)
+mc_file <- file.path(DERIVED_DIR, "mc_tstar_distributions_baseline.csv")
 if (file.exists(mc_file)) {
   mc_distributions <- read_csv(mc_file, show_col_types = FALSE)
   has_mc <- TRUE
+  message("✓ Loaded MC T* distributions: ", nrow(mc_distributions), " rows")
 } else {
   has_mc <- FALSE
+  message("MC T* distributions not found - histogram will be disabled")
 }
 
 # Load community stats (if available)
@@ -136,11 +139,11 @@ calculate_npv_components_property <- function(parcel_id, scenario, hazards_data,
     }
     
     rent <- prop_params$rent
-    discount_rate <- prop_params$discount_rate
-    damage_threshold <- prop_params$damage_threshold
+    discount_rate <- 0.05  # Fixed market rate (used for T* calculation)
+    damage_threshold <- 0.15  # Fixed threshold
     strval <- prop_params$strval
     
-    if (any(is.na(c(rent, discount_rate, damage_threshold, strval)))) {
+    if (any(is.na(c(rent, strval)))) {
       message("Missing parameters for parcel ", parcel_id)
       return(NULL)
     }
@@ -148,7 +151,7 @@ calculate_npv_components_property <- function(parcel_id, scenario, hazards_data,
     beta <- 1 / (1 + discount_rate)
     depth_params <- c(a = 0.4, b = 1, d = 2)
     
-    # Get flood timeline - THIS IS KEY: years in data are 0-74
+    # Get flood timeline
     flood_timeline <- hazards_data %>%
       filter(parcel_id == !!parcel_id, scenario == !!scenario) %>%
       arrange(year) %>%
@@ -167,28 +170,39 @@ calculate_npv_components_property <- function(parcel_id, scenario, hazards_data,
     n_years <- min(bigT, nrow(flood_timeline))
     beta_powers <- beta^(1:n_years)
     
-    # Calculate NPV vectors - MATCHES MAIN SCRIPT LOGIC
-    # npv_r_vec[t] = NPV of rent from year t onwards
-    # npv_d_vec[t] = NPV of damages from year t onwards
+    # Calculate NPV vectors - UPDATED TO MATCH NEW MODEL
+    # npv_r_vec[t] = NPV of perpetual rent (constant)
+    # npv_d_vec[t] = NPV of damages from year t to 2100 + perpetual tail
     
-    npv_r_vec <- numeric(n_years)
+    # NPV(Rents) - Perpetuity (constant for all years)
+    npv_r_perpetuity <- rent * (1 + discount_rate) / discount_rate
+    npv_r_vec <- rep(npv_r_perpetuity, n_years)
+    
+    # NPV(Damages) - Finite + Perpetual tail
     npv_d_vec <- numeric(n_years)
+    annual_damages <- flood_timeline$annual_damage
     
     for (t in 1:n_years) {
       years_remaining <- n_years - t + 1
       
-      # NPV of rent from year t onwards
-      npv_r_vec[t] <- rent * sum(beta_powers[1:years_remaining])
-      
-      # NPV of damages from year t onwards
-      if (t <= nrow(flood_timeline)) {
-        end_idx <- min(nrow(flood_timeline), n_years)
-        damage_vals <- flood_timeline$annual_damage[t:end_idx]
-        npv_d_vec[t] <- sum(damage_vals * beta_powers[1:length(damage_vals)])
+      # Part 1: Known damages from t to 2100
+      if (t <= length(annual_damages)) {
+        end_idx <- min(length(annual_damages), n_years)
+        damage_vals <- annual_damages[t:end_idx]
+        npv_known <- sum(damage_vals * beta_powers[1:length(damage_vals)])
+      } else {
+        npv_known <- 0
       }
+      
+      # Part 2: Perpetual damages after 2100 (constant at year 2100 level)
+      final_damage <- annual_damages[min(length(annual_damages), n_years)]
+      discount_to_T_hat <- beta^years_remaining
+      npv_perpetual <- (final_damage / discount_rate) * discount_to_T_hat
+      
+      npv_d_vec[t] <- npv_known + npv_perpetual
     }
     
-    # Create output with year labels 1-75
+    # Create output
     npv_data <- tibble(
       year = 1:n_years,
       npv_rent = npv_r_vec,
@@ -214,7 +228,7 @@ cliff_scenarios <- if(length(cliff_scenarios_raw) > 0) {
 has_cliff_scenarios <- !is.null(cliff_scenarios) && length(cliff_scenarios) > 1
 
 # Check for government economics columns
-has_gov_econ <- all(c("gov_net_cost", "gov_outcome", "gov_rent_collected") %in% names(baseline_results))
+has_gov_econ <- all(c("gov_net_cost", "gov_outcome", "leaseback_revenue", "npv_repairs") %in% names(baseline_results))
 has_buyout_cap <- "buyout_capped" %in% names(baseline_results)
 
 
@@ -271,36 +285,28 @@ ui <- dashboardPage(
     hr(),
     h4("Parameters", style = "padding-left: 15px; font-weight: bold;"),
     
+    div(style = "padding: 10px 15px; background-color: #f8f9fa; margin: 10px; border-radius: 5px; border: 1px solid #dee2e6;",
+        p(strong("Fixed Parameters:"), style = "margin-bottom: 8px; color: #212529; font-size: 14px;"),
+        p("• Market Discount Rate (T*): 5%", style = "margin: 2px 0; font-size: 13px; color: #495057;"),
+        p("• Rental Yield: 5%", style = "margin: 2px 0; font-size: 13px; color: #495057;"),
+        p("• Damage Threshold: 15cm", style = "margin: 2px 0; font-size: 13px; color: #495057;")
+    ),
+    
     sliderInput(
-      "rental_yield",
-      "Rental Yield (%):",
-      min = 3,
-      max = 6,
-      value = 5,
+      "discount_rate_gov",
+      "Government Discount Rate (δ_g %):",
+      min = 2,
+      max = 4,
+      value = 2,
       step = 1,
       post = "%"
     ),
     
-    sliderInput(
-      "discount_rate",
-      "Discount Rate (%):",
-      min = 1.5,
-      max = 3.0,
-      value = 2.0,
-      step = 0.5,
-      post = "%"
-    ),
-    
-    conditionalPanel(
-      condition = paste0("'", site_type, "' != 'CLIFF'"),
-      sliderInput(
-        "damage_threshold",
-        "Damage Threshold (cm):",
-        min = 15,
-        max = 30,
-        value = 15,
-        step = 15
-      )
+    div(style = "padding: 10px 15px; background-color: #d1ecf1; margin: 10px; border-radius: 5px; border: 1px solid #bee5eb;",
+        p(strong("δ_g affects:"), style = "margin-bottom: 8px; color: #0c5460; font-size: 14px;"),
+        p("• Leaseback Revenue", style = "margin: 2px 0; font-size: 13px; color: #0c5460;"),
+        p("• NPV Repair Costs", style = "margin: 2px 0; font-size: 13px; color: #0c5460;"),
+        p("• Government Net Cost", style = "margin: 2px 0; font-size: 13px; color: #0c5460;")
     ),
     
     hr(),
@@ -541,7 +547,7 @@ ui <- dashboardPage(
             status = "danger",
             solidHeader = TRUE,
             width = 12,
-            p("Monte Carlo distributions were not found. Make sure 'mc_distributions_baseline.csv' exists in the derived data directory."),
+            p("Monte Carlo distributions were not found. Make sure 'mc_tstar_distributions_baseline.csv' exists in the derived data directory."),
             p("Run the valuation script with Monte Carlo enabled to generate this data.")
           )
         )
@@ -660,19 +666,10 @@ server <- function(input, output, session) {
     
     # Apply parameter filters based on sliders
     # Note: Data has parameters as decimals (e.g., 0.05 = 5%), slider shows percentages
-    if ("rental_yield" %in% names(df)) {
-      target_yield <- input$rental_yield / 100  # Convert 5% -> 0.05
-      df <- df %>% filter(abs(rental_yield - target_yield) < 0.001)
-    }
-    
-    if ("discount_rate" %in% names(df)) {
-      target_rate <- input$discount_rate / 100  # Convert 2% -> 0.02
-      df <- df %>% filter(abs(discount_rate - target_rate) < 0.001)
-    }
-    
-    if ("damage_threshold" %in% names(df) && site_type != "CLIFF") {
-      target_threshold <- input$damage_threshold / 100  # Convert 15cm -> 0.15m
-      df <- df %>% filter(abs(damage_threshold - target_threshold) < 0.001)
+    # Filter by government discount rate (only varying parameter)
+    if ("discount_rate_gov" %in% names(df)) {
+      target_rate_gov <- input$discount_rate_gov / 100  # Convert 2% -> 0.02
+      df <- df %>% filter(abs(discount_rate_gov - target_rate_gov) < 0.001)
     }
     
     n_after <- nrow(df)
@@ -684,9 +681,9 @@ server <- function(input, output, session) {
       } else {
         ""
       }
-      message(sprintf("Filtered from %d to %d rows for scenario=%s%s, yield=%.0f%%, discount=%.1f%%, threshold=%.0fcm",
+      message(sprintf("Filtered from %d to %d rows for scenario=%s%s, δ_gov=%.0f%%",
                       n_before, n_after, input$slr_scenario, cliff_msg,
-                      input$rental_yield, input$discount_rate, input$damage_threshold))
+                      input$discount_rate_gov))
     }
     
     # If no matches found, use baseline
@@ -734,8 +731,9 @@ server <- function(input, output, session) {
       "<strong>Current Parameters:</strong> ",
       "SLR: ", input$slr_scenario, " | ",
       cliff_display,
-      "Rental Yield: ", input$rental_yield, "% | ",
-      "Discount: ", input$discount_rate, "% | ",
+      "Market δ: 5% (fixed) | ",
+      "Gov δ_g: ", input$discount_rate_gov, "% | ",
+      "Rental Yield: 5% (fixed) | ",
       threshold_display,
       "<span style='color: #2ecc71;'><strong>", n_props, " properties analyzed</strong></span>"
     ))
@@ -758,13 +756,13 @@ server <- function(input, output, session) {
       valueBox("N/A", "Revenue data not available", icon = icon("question"), color = "red")
     } else {
       df <- filtered_data() %>% filter(!is.na(buyout_price))
-      rent <- sum(df$gov_rent_collected, na.rm = TRUE)
+      rent <- sum(df$leaseback_revenue, na.rm = TRUE)
       # Land has no value at T* (removed from model)
       total <- rent
       
       valueBox(
         paste0("$", round(total / 1e6, 1), "M"),
-        "Total Revenue (Rent Only)",
+        "Leaseback Revenue",
         icon = icon("coins"),
         color = "green"
       )
@@ -830,13 +828,13 @@ server <- function(input, output, session) {
       valueBox("N/A", "Data not available", icon = icon("question"), color = "red")
     } else {
       df <- filtered_data() %>% filter(!is.na(buyout_price))
-      rent <- sum(df$gov_rent_collected, na.rm = TRUE)
+      repairs <- sum(df$npv_repairs, na.rm = TRUE)
       
       valueBox(
-        paste0("$", round(rent / 1e6, 1), "M"),
-        "Rent Collected",
-        icon = icon("money-bill-wave"),
-        color = "blue"
+        paste0("$", round(repairs / 1e6, 1), "M"),
+        "NPV Repair Costs",
+        icon = icon("tools"),
+        color = "orange"
       )
     }
   })
@@ -867,14 +865,14 @@ server <- function(input, output, session) {
       df <- filtered_data() %>% filter(!is.na(buyout_price))
       
       buyout_total <- sum(df$buyout_price, na.rm = TRUE) / 1e6
-      rent_total <- sum(df$gov_rent_collected, na.rm = TRUE) / 1e6
-      # Land has no value at T* (removed from model)
+      leaseback_total <- sum(df$leaseback_revenue, na.rm = TRUE) / 1e6
+      repairs_total <- sum(df$npv_repairs, na.rm = TRUE) / 1e6
       net_total <- sum(df$gov_net_cost, na.rm = TRUE) / 1e6
       
       data <- data.frame(
-        category = c("Buyout Paid", "Rent Collected", "Net Cost/Profit"),
-        value = c(-buyout_total, rent_total, -net_total),
-        type = c("cost", "revenue", if(net_total < 0) "profit" else "cost")
+        category = c("Buyout Paid", "Leaseback Revenue", "Repair Costs", "Net Cost/Profit"),
+        value = c(-buyout_total, leaseback_total, -repairs_total, -net_total),
+        type = c("cost", "revenue", "cost", if(net_total < 0) "profit" else "cost")
       )
       
       colors <- c("cost" = "#e74c3c", "revenue" = "#3498db", "profit" = "#2ecc71")
@@ -995,15 +993,27 @@ server <- function(input, output, session) {
   })
   
   output$timing_explanation <- renderUI({
-    HTML("
-      <p><strong>Key Pattern:</strong></p>
-      <ul>
-        <li><strong>Immediate retreat:</strong> Government breaks even (buyout ≈ rent + land)</li>
-        <li><strong>Late retreat:</strong> Government profits (capped buyout < total revenue)</li>
-      </ul>
-      <p>Properties with longer time horizons generate more profit because the buyout is capped at market price,
-      but government collects decades of rental income.</p>
-    ")
+    if (site_type == "CLIFF") {
+      HTML("
+        <p><strong>Key Pattern (Cliff Site):</strong></p>
+        <ul>
+          <li><strong>Immediate retreat:</strong> Already within 10m — retreat year = 1, minimal leaseback revenue</li>
+          <li><strong>Mid/Late retreat:</strong> Government profits strongly — decades of rent collected before cliff reaches 10m</li>
+        </ul>
+        <p>Cliff sites have no flood repair costs (NPV Repairs = 0), so the program is especially profitable.
+        Government profit grows with retreat horizon since buyout is capped at market price but full rent is collected.</p>
+      ")
+    } else {
+      HTML("
+        <p><strong>Key Pattern:</strong></p>
+        <ul>
+          <li><strong>Immediate retreat:</strong> Government breaks even (buyout ≈ rent + land)</li>
+          <li><strong>Late retreat:</strong> Government profits (capped buyout < total revenue)</li>
+        </ul>
+        <p>Properties with longer time horizons generate more profit because the buyout is capped at market price,
+        but government collects decades of rental income.</p>
+      ")
+    }
   })
   
   # TAB 2: PROPERTY BUYOUTS OUTPUTS
@@ -1157,9 +1167,9 @@ server <- function(input, output, session) {
     scenario_summary <- baseline_results %>%
       group_by(scenario) %>%
       summarise(
-        mean_year = mean(retreat_year[retreat_year <= 80], na.rm = TRUE),
-        median_year = median(retreat_year[retreat_year <= 80], na.rm = TRUE),
-        n_retreat = sum(retreat_year <= 80),
+        mean_year = mean(retreat_year, na.rm = TRUE),
+        median_year = median(retreat_year, na.rm = TRUE),
+        n_retreat = sum(!is.na(retreat_year)),
         .groups = "drop"
       ) %>%
       # Ensure correct ordering
@@ -1188,7 +1198,7 @@ server <- function(input, output, session) {
           group_by(scenario, cliff_scenario) %>%
           summarise(
             buyout = sum(buyout_price, na.rm = TRUE) / 1e6,
-            rent = sum(gov_rent_collected, na.rm = TRUE) / 1e6,
+            rent = sum(leaseback_revenue, na.rm = TRUE) / 1e6,
             # Land has no value at T* (removed from model)
             net = sum(gov_net_cost, na.rm = TRUE) / 1e6,
             .groups = "drop"
@@ -1233,7 +1243,7 @@ server <- function(input, output, session) {
           group_by(scenario) %>%
           summarise(
             buyout = sum(buyout_price, na.rm = TRUE) / 1e6,
-            rent = sum(gov_rent_collected, na.rm = TRUE) / 1e6,
+            rent = sum(leaseback_revenue, na.rm = TRUE) / 1e6,
             # Land has no value at T* (removed from model)
             net = sum(gov_net_cost, na.rm = TRUE) / 1e6,
             .groups = "drop"
@@ -1263,7 +1273,7 @@ server <- function(input, output, session) {
   output$cumulative_retreat <- renderPlotly({
     # Get baseline only, all scenarios
     cumulative_data <- baseline_results %>%
-      filter(retreat_year <= 80) %>%
+      filter(!is.na(retreat_year)) %>%
       group_by(scenario) %>%
       arrange(retreat_year) %>%
       mutate(cumulative = row_number()) %>%
@@ -1280,15 +1290,28 @@ server <- function(input, output, session) {
   })
   
   output$scenario_interpretation <- renderUI({
-    HTML("
-      <p><strong>Key Insights:</strong></p>
-      <ul>
-        <li><strong>Higher SLR → Earlier retreat:</strong> Properties become unviable sooner</li>
-        <li><strong>Higher SLR → More properties retreat:</strong> 100% retreat under High scenario</li>
-        <li><strong>Government profit decreases with higher SLR:</strong> Less time to collect rent</li>
-      </ul>
-      <p>The program remains profitable across all SLR scenarios, but returns diminish as sea level rise accelerates.</p>
-    ")
+    if (site_type == "CLIFF") {
+      HTML("
+        <p><strong>Key Insights (Cliff Site):</strong></p>
+        <ul>
+          <li><strong>Higher SLR → Faster erosion:</strong> Cliff retreat rates accelerate under higher scenarios</li>
+          <li><strong>HoldTheLine vs LetItGo:</strong> Armoring delays but does not prevent eventual retreat</li>
+          <li><strong>Government profit decreases with higher SLR:</strong> Less time to collect rent before 10m threshold</li>
+        </ul>
+        <p>Unlike flood sites, cliff retreat timing is deterministic — there is no storm variability. Uncertainty
+        comes from differences in SLR scenario and management approach (armoring vs. natural erosion).</p>
+      ")
+    } else {
+      HTML("
+        <p><strong>Key Insights:</strong></p>
+        <ul>
+          <li><strong>Higher SLR → Earlier retreat:</strong> Properties become unviable sooner</li>
+          <li><strong>Higher SLR → More properties retreat:</strong> 100% retreat under High scenario</li>
+          <li><strong>Government profit decreases with higher SLR:</strong> Less time to collect rent</li>
+        </ul>
+        <p>The program remains profitable across all SLR scenarios, but returns diminish as sea level rise accelerates.</p>
+      ")
+    }
   })
   
   # TAB 4: MONTE CARLO OUTPUTS
@@ -1310,8 +1333,9 @@ server <- function(input, output, session) {
   })
   
   output$mc_uncertainty_box <- renderInfoBox({
-    if (!has_mc) {
-      infoBox("Uncertainty", "N/A", icon = icon("question"), color = "red")
+    if (!has_mc || site_type == "CLIFF") {
+      infoBox("Uncertainty", if(site_type == "CLIFF") "Not applicable (cliff site)" else "N/A", 
+              icon = icon("question"), color = if(site_type == "CLIFF") "blue" else "red")
     } else {
       df <- baseline_data() %>% filter(mc_enabled == TRUE)
       avg_sd <- mean(df$mc_sd_year, na.rm = TRUE)
@@ -1326,8 +1350,9 @@ server <- function(input, output, session) {
   })
   
   output$mc_range_box <- renderInfoBox({
-    if (!has_mc) {
-      infoBox("Range", "N/A", icon = icon("question"), color = "red")
+    if (!has_mc || site_type == "CLIFF") {
+      infoBox("Range", if(site_type == "CLIFF") "Not applicable" else "N/A", 
+              icon = icon("question"), color = if(site_type == "CLIFF") "blue" else "red")
     } else {
       df <- baseline_data() %>% filter(mc_enabled == TRUE)
       avg_range <- mean(df$mc_range_years, na.rm = TRUE)
@@ -1342,8 +1367,9 @@ server <- function(input, output, session) {
   })
   
   output$mc_confidence_box <- renderInfoBox({
-    if (!has_mc) {
-      infoBox("Confidence", "N/A", icon = icon("question"), color = "red")
+    if (!has_mc || site_type == "CLIFF") {
+      infoBox("Confidence", if(site_type == "CLIFF") "Cliff retreat is deterministic" else "N/A",
+              icon = icon("info-circle"), color = if(site_type == "CLIFF") "blue" else "red")
     } else {
       df <- baseline_data() %>% filter(mc_enabled == TRUE)
       avg_sd <- mean(df$mc_sd_year, na.rm = TRUE)
@@ -1385,10 +1411,15 @@ server <- function(input, output, session) {
                scenario == input$slr_scenario)
       
       if (nrow(mc_prop) == 0) {
-        plot_ly() %>% layout(title = "No MC data for this property")
+        plot_ly() %>% layout(title = "No MC data for this property/scenario")
       } else {
+        # Calculate statistics directly from the distribution
+        mean_val <- mean(mc_prop$retreat_year, na.rm = TRUE)
+        median_val <- median(mc_prop$retreat_year, na.rm = TRUE)
+        
         plot_ly(mc_prop, x = ~retreat_year, type = "histogram",
-                marker = list(color = "#3498db")) %>%
+                marker = list(color = "#3498db"),
+                nbinsx = 30) %>%
           layout(
             title = paste0("MC Distribution: ", prop$ADDRESS),
             xaxis = list(title = "Retreat Year"),
@@ -1397,8 +1428,8 @@ server <- function(input, output, session) {
               # Mean line
               list(
                 type = "line",
-                x0 = prop$mc_mean_year,
-                x1 = prop$mc_mean_year,
+                x0 = mean_val,
+                x1 = mean_val,
                 y0 = 0,
                 y1 = 1,
                 yref = "paper",
@@ -1407,8 +1438,8 @@ server <- function(input, output, session) {
               # Median line
               list(
                 type = "line",
-                x0 = prop$mc_median_year,
-                x1 = prop$mc_median_year,
+                x0 = median_val,
+                x1 = median_val,
                 y0 = 0,
                 y1 = 1,
                 yref = "paper",
@@ -1416,12 +1447,14 @@ server <- function(input, output, session) {
               )
             ),
             annotations = list(
-              list(x = prop$mc_mean_year, y = 1, yref = "paper",
-                   text = "Mean", showarrow = FALSE, yshift = 10,
-                   font = list(color = "red")),
-              list(x = prop$mc_median_year, y = 0.9, yref = "paper",
-                   text = "Median", showarrow = FALSE, yshift = 10,
-                   font = list(color = "green"))
+              list(x = mean_val, y = 1, yref = "paper",
+                   text = paste0("Mean (", round(mean_val, 1), ")"), 
+                   showarrow = FALSE, yshift = 10,
+                   font = list(color = "red", size = 10)),
+              list(x = median_val, y = 0.9, yref = "paper",
+                   text = paste0("Median (", round(median_val, 0), ")"), 
+                   showarrow = FALSE, yshift = 10,
+                   font = list(color = "green", size = 10))
             )
           )
       }
@@ -1432,25 +1465,41 @@ server <- function(input, output, session) {
     if (!has_mc || is.null(input$mc_property)) {
       HTML("<p>Select a property to see MC statistics.</p>")
     } else {
-      df <- baseline_data()
-      prop <- df %>% filter(parcel_id == input$mc_property) %>% slice(1)
+      # Get MC distributions for this property
+      mc_prop <- mc_distributions %>%
+        filter(parcel_id == input$mc_property,
+               scenario == input$slr_scenario)
       
-      HTML(paste0(
-        "<p><strong>Monte Carlo Statistics:</strong></p>",
-        "<ul>",
-        "<li>Mean: ", round(prop$mc_mean_year, 1), " years</li>",
-        "<li>Median: ", round(prop$mc_median_year, 1), " years</li>",
-        "<li>SD: ±", round(prop$mc_sd_year, 1), " years</li>",
-        "<li>90% CI: [", round(prop$mc_q05_year, 1), ", ", round(prop$mc_q95_year, 1), "]</li>",
-        "<li>Range: ", round(prop$mc_range_years, 1), " years</li>",
-        "</ul>"
-      ))
+      if (nrow(mc_prop) == 0) {
+        HTML("<p>No MC data available for this property/scenario.</p>")
+      } else {
+        # Calculate from actual distribution
+        mean_val <- mean(mc_prop$retreat_year, na.rm = TRUE)
+        median_val <- median(mc_prop$retreat_year, na.rm = TRUE)
+        sd_val <- sd(mc_prop$retreat_year, na.rm = TRUE)
+        q05_val <- quantile(mc_prop$retreat_year, 0.05, na.rm = TRUE)
+        q95_val <- quantile(mc_prop$retreat_year, 0.95, na.rm = TRUE)
+        range_val <- q95_val - q05_val
+        
+        HTML(paste0(
+          "<p><strong>Monte Carlo Statistics:</strong></p>",
+          "<ul>",
+          "<li>Mean: ", round(mean_val, 1), " years</li>",
+          "<li>Median: ", round(median_val, 0), " years</li>",
+          "<li>SD: ±", round(sd_val, 1), " years</li>",
+          "<li>90% CI: [", round(q05_val, 0), ", ", round(q95_val, 0), "]</li>",
+          "<li>Range: ", round(range_val, 0), " years</li>",
+          "</ul>"
+        ))
+      }
     }
   })
   
   output$mc_uncertainty_scatter <- renderPlotly({
-    if (!has_mc) {
-      plot_ly() %>% layout(title = "MC data not available")
+    if (!has_mc || site_type == "CLIFF") {
+      plot_ly() %>% layout(title = if(site_type == "CLIFF") 
+        "Monte Carlo not applicable: cliff retreat timing is deterministic given erosion rates" 
+        else "MC data not available")
     } else {
       df <- baseline_data() %>% filter(mc_enabled == TRUE)
       
@@ -1473,8 +1522,10 @@ server <- function(input, output, session) {
   })
   
   output$mc_community_stats <- renderUI({
-    if (!has_mc) {
-      HTML("<p>MC data not available.</p>")
+    if (!has_mc || site_type == "CLIFF") {
+      HTML(if(site_type == "CLIFF") 
+        "<p>Monte Carlo is not applicable for cliff sites. Retreat timing is determined deterministically by the cliff erosion rate reaching the 10m safety threshold.</p>"
+        else "<p>MC data not available.</p>")
     } else {
       df <- baseline_data() %>% filter(mc_enabled == TRUE)
       
@@ -1589,7 +1640,7 @@ server <- function(input, output, session) {
           "<p><strong>Economics:</strong></p>",
           "<ul>",
           "<li>Buyout: $", format(round(prop$buyout_price), big.mark = ","), "</li>",
-          "<li>Rent NPV: $", format(round(prop$gov_rent_collected), big.mark = ","), "</li>",
+          "<li>Rent NPV: $", format(round(prop$leaseback_revenue), big.mark = ","), "</li>",
           "<li>Gov Net: $", format(round(prop$gov_net_cost), big.mark = ","), "</li>",
           "<li>Outcome: <strong>", prop$gov_outcome, "</strong></li>",
           "</ul>"
@@ -1598,21 +1649,10 @@ server <- function(input, output, session) {
     }
   })
   
-  # NPV timeline plot for selected property
+  # NPV timeline / cliff distance plot for selected property
   output$selected_property_npv <- renderPlotly({
     req(input$retreat_map_marker_click)
     
-    # Load hazards data
-    hazards_file <- file.path(DERIVED_DIR, "cosmos_annual_hazards.csv")
-    if (!file.exists(hazards_file)) {
-      return(plotly_empty() %>% 
-               layout(title = list(text = "Hazards data not available", 
-                                   font = list(size = 10))))
-    }
-    
-    hazards <- read_csv(hazards_file, show_col_types = FALSE)
-    
-    # Get clicked property
     click <- input$retreat_map_marker_click
     selected_prop <- filtered_data() %>%
       filter(parcel_id == click$id) %>%
@@ -1620,66 +1660,146 @@ server <- function(input, output, session) {
     
     if (nrow(selected_prop) == 0) {
       return(plotly_empty() %>%
-               layout(title = list(text = "No property selected",
-                                   font = list(size = 10))))
+               layout(title = list(text = "No property selected", font = list(size = 10))))
     }
     
-    # Calculate NPV components
-    npv_data <- calculate_npv_components_property(
-      parcel_id = selected_prop$parcel_id,
-      scenario = selected_prop$scenario,
-      hazards_data = hazards,
-      baseline_data = filtered_data(),
-      bigT = 75
-    )
+    # ── CLIFF SITES: show projected cliff distance over time ──────────────────
+    if (site_type == "CLIFF") {
+      # Load annual hazards to get cliff_dist_m trajectory
+      hazards_file <- file.path(DERIVED_DIR, "cosmos_annual_hazards.csv")
+      if (!file.exists(hazards_file)) {
+        return(plotly_empty() %>%
+                 layout(title = list(text = "Annual hazards file not found", font = list(size = 10))))
+      }
+      
+      hazards <- read_csv(hazards_file, show_col_types = FALSE)
+      
+      cliff_scen <- if (!is.null(input$cliff_scenario)) input$cliff_scenario else selected_prop$cliff_scenario
+      
+      cliff_ts <- hazards %>%
+        filter(
+          parcel_id == click$id,
+          scenario == input$slr_scenario,
+          if ("cliff_scenario" %in% names(hazards)) cliff_scenario == cliff_scen else TRUE
+        ) %>%
+        arrange(year)
+      
+      if (nrow(cliff_ts) == 0 || !"cliff_dist_m" %in% names(cliff_ts)) {
+        return(plotly_empty() %>%
+                 layout(title = list(text = "No cliff distance data available", font = list(size = 10))))
+      }
+      
+      tstar <- selected_prop$retreat_year
+      
+      p <- plot_ly(cliff_ts, x = ~year, y = ~cliff_dist_m, type = "scatter", mode = "lines",
+                   line = list(color = "#e67e22", width = 2),
+                   name = "Cliff Distance") %>%
+        add_lines(x = range(cliff_ts$year), y = c(10, 10),
+                  line = list(color = "red", dash = "dash", width = 1.5),
+                  name = "10m Threshold") %>%
+        layout(
+          title = list(text = "Cliff Distance to Property", font = list(size = 10)),
+          xaxis = list(title = "Year", tickfont = list(size = 8)),
+          yaxis = list(title = "Distance (m)", tickfont = list(size = 8)),
+          legend = list(orientation = "h", y = -0.3, font = list(size = 8)),
+          margin = list(l = 50, r = 20, t = 25, b = 60)
+        )
+      
+      # Add T* vertical line if property retreats
+      if (!is.na(tstar)) {
+        p <- p %>% add_lines(
+          x = c(tstar, tstar), y = c(0, max(cliff_ts$cliff_dist_m, na.rm = TRUE)),
+          line = list(color = "black", dash = "dot", width = 1.5),
+          name = paste0("T*=", round(tstar))
+        )
+      }
+      
+      return(p)
+    }
+    
+    # ── FLOOD SITES: NPV curve intersection plot ──────────────────────────────
+    hazards_file <- file.path(DERIVED_DIR, "cosmos_annual_hazards.csv")
+    if (!file.exists(hazards_file)) {
+      return(plotly_empty() %>% 
+               layout(title = list(text = "Hazards data not available", font = list(size = 10))))
+    }
+    
+    hazards <- read_csv(hazards_file, show_col_types = FALSE)
+    
+    if ("mean_annual_damages" %in% names(selected_prop) && 
+        !is.null(selected_prop$mean_annual_damages[[1]])) {
+      
+      annual_damages <- selected_prop$mean_annual_damages[[1]]
+      rent <- selected_prop$rent
+      discount_rate <- 0.05
+      bigT_calc <- length(annual_damages)
+      beta <- 1 / (1 + discount_rate)
+      beta_powers <- beta^(1:bigT_calc)
+      
+      npv_r_perpetuity <- rent * (1 + discount_rate) / discount_rate
+      npv_r_vec <- rep(npv_r_perpetuity, bigT_calc)
+      npv_d_vec <- numeric(bigT_calc)
+      
+      for (t in 1:bigT_calc) {
+        years_remaining <- bigT_calc - t + 1
+        npv_known <- sum(annual_damages[t:bigT_calc] * beta_powers[1:years_remaining])
+        final_damage <- annual_damages[bigT_calc]
+        discount_to_T_hat <- beta^years_remaining
+        npv_perpetual <- (final_damage / discount_rate) * discount_to_T_hat
+        npv_d_vec[t] <- npv_known + npv_perpetual
+      }
+      
+      npv_data <- tibble(year = 1:bigT_calc, npv_rent = npv_r_vec, npv_damage = npv_d_vec)
+      
+    } else {
+      npv_data <- calculate_npv_components_property(
+        parcel_id = selected_prop$parcel_id,
+        scenario = selected_prop$scenario,
+        hazards_data = hazards,
+        baseline_data = filtered_data(),
+        bigT = 75
+      )
+    }
     
     if (is.null(npv_data)) {
       return(plotly_empty() %>% 
-               layout(title = list(text = "NPV data not available",
-                                   font = list(size = 10))))
+               layout(title = list(text = "NPV data not available", font = list(size = 10))))
     }
     
-    # Reshape for plotting
     npv_long <- npv_data %>%
-      pivot_longer(cols = c(npv_rent, npv_damage), 
-                   names_to = "component", 
-                   values_to = "value") %>%
+      pivot_longer(cols = c(npv_rent, npv_damage), names_to = "component", values_to = "value") %>%
       mutate(component = recode(component,
-                                npv_rent = "Rental Income",
-                                npv_damage = "Flood Damages"))
+                                npv_rent = "NPV(Perpetual Rents)",
+                                npv_damage = "NPV(Damages + Tail)"))
     
-    # Create plot
     p <- ggplot(npv_long, aes(x = year, y = value, color = component)) +
       geom_line(size = 1.2) +
-      labs(x = "Year", y = "NPV ($)", color = "") +
+      labs(x = "Year", y = "NPV ($)", title = "T* = Intersection of NPV Curves") +
       scale_y_continuous(labels = dollar_format()) +
-      scale_color_manual(values = c("Rental Income" = "#27ae60", 
-                                    "Flood Damages" = "#c0392b")) +
+      scale_color_manual(values = c("NPV(Perpetual Rents)" = "#27ae60", "NPV(Damages + Tail)" = "#c0392b")) +
       theme_minimal(base_size = 9) +
-      theme(legend.position = "bottom",
-            legend.text = element_text(size = 8),
-            axis.title = element_text(size = 9),
-            axis.text = element_text(size = 8))
+      theme(legend.position = "bottom", legend.text = element_text(size = 8),
+            axis.title = element_text(size = 9), axis.text = element_text(size = 8),
+            plot.title = element_text(size = 10, hjust = 0.5))
     
-    # Add T* marker if available
     if (!is.na(selected_prop$retreat_year)) {
-      p <- p + geom_vline(xintercept = selected_prop$retreat_year, 
+      p <- p + geom_vline(xintercept = selected_prop$retreat_year,
                           linetype = "dashed", color = "black", alpha = 0.6)
+      tstar <- selected_prop$retreat_year
+      if (tstar > 50) {
+        p <- p + coord_cartesian(xlim = c(max(0, tstar - 20), min(74, tstar + 10)))
+      }
     }
     
     ggplotly(p, tooltip = c("x", "y")) %>%
-      layout(
-        legend = list(orientation = "h", y = -0.25, x = 0.5, xanchor = "center"),
-        margin = list(l = 50, r = 20, t = 20, b = 60)
-      )
+      layout(legend = list(orientation = "h", y = -0.25, x = 0.5, xanchor = "center"),
+             margin = list(l = 50, r = 20, t = 20, b = 60))
   })
   
   # RESET BUTTON
   
   observeEvent(input$reset, {
-    updateSliderInput(session, "rental_yield", value = 5)
-    updateSliderInput(session, "discount_rate", value = 2.0)
-    updateSliderInput(session, "damage_threshold", value = 15)
+    updateSliderInput(session, "discount_rate_gov", value = 2)
     updateSelectInput(session, "slr_scenario", selected = scenarios[1])  # Intermediate
   })
 }
@@ -1687,4 +1807,3 @@ server <- function(input, output, session) {
 
 # RUN APP
 shinyApp(ui, server)
-

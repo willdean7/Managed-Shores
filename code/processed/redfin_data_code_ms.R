@@ -39,7 +39,7 @@ library(mgcv)
 
 # CONFIGURATION - EDIT THIS SECTION FOR EACH CASE STUDY
 # Study area configuration
-CASE_NAME <- "stinson"  # Change to study area: carpinteria, pacifica, stinson, isla_vista, etc.
+CASE_NAME <- "carpinteria"  # Change to study area: carpinteria, pacifica, stinson, isla_vista, etc.
 DATA_DIR <- here("data", CASE_NAME)
 dir.create(DATA_DIR, recursive = TRUE, showWarnings = FALSE)
 
@@ -53,12 +53,12 @@ dir.create(DATA_DIR, recursive = TRUE, showWarnings = FALSE)
 #   4. Lower % = more flags (catch more potentially old sale data)
 #
 # Example thresholds for California coastal towns (2024-2025 data):
-#   Carpinteria:   $950,000    (median ~$1.35-1.40M, Redfin/Rocket Homes 2025)
-#   Isla Vista:    $850,000    (median ~$1.35-1.40M single-family, Zillow 2025)*
+#   Carpinteria:   $2,000,000    (median ~$1.35-1.40M, Redfin/Rocket Homes 2025)
+#   Isla Vista:    $1,000,000    (median ~$1.35-1.40M single-family, Zillow 2025)*
 #   King Salmon:   $270,000    (median ~$400-450K est., Humboldt County MLS 2025)**
-#   Malibu:        $1,900,000  (median ~$2.9-3.3M, Redfin/Zillow Nov 2025)
-#   Pacifica:      $750,000    (median ~$1.15-1.30M, Redfin/ATTOM 2025)
-#   Stinson Beach: $3,300,000  (median ~$5.0-5.2M, Redfin/PropertyShark 2025)
+#   Malibu:        $2,000,000  (median ~$2.9-3.3M, Redfin/Zillow Nov 2025)
+#   Pacifica:      $800,000    (median ~$1.15-1.30M, Redfin/ATTOM 2025)
+#   Stinson Beach: $3,500,000  (median ~$5.0-5.2M, Redfin/PropertyShark 2025)
 #
 # Sources: 
 #   - Redfin Housing Market Reports (accessed Jan 2026)
@@ -80,7 +80,7 @@ dir.create(DATA_DIR, recursive = TRUE, showWarnings = FALSE)
 #      sea level rise vulnerability on U.S. West Coast—critical for managed 
 #      retreat analysis.
 
-PRICE_THRESHOLD <- 3300000  # ← UPDATE THIS for each case study location
+PRICE_THRESHOLD <- 2000000  # ← UPDATE THIS for each case study location
 
 # Validation flags
 RUN_CROSS_VALIDATION <- TRUE  # Set FALSE for faster runs (but less validation)

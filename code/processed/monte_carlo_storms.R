@@ -2,6 +2,16 @@
 # Monte Carlo Storm Simulation Module
 # Author: Will Dean
 #
+# UPDATED NPV FORMULAS (Feb 2026):
+#   - Market discount rate (δ): 5% (rental yield rate)
+#   - NPV(Rents): Perpetuity formula = rent × (1+δ)/δ (constant for all years t)
+#   - NPV(Damages): Finite (t→2100) + Perpetual tail (2100→∞ at constant level)
+#   - T* calculated when NPV(damages from t) ≥ NPV(perpetual rents)
+#
+# Government calculations (in cosmos_valuation_v3.R) use δ_g = 2% for:
+#   - Leaseback revenue
+#   - Repair costs
+#
 
 library(dplyr)
 library(tidyr)
@@ -230,13 +240,11 @@ calc_tstar_monte_carlo <- function(prop_id, scenario_name, cliff_scen_name,
   # Pre-compute beta powers (used repeatedly)
   beta_powers <- beta^(1:bigT)
   
-  # Pre-compute rental NPV for each starting year
-  npv_r_vec <- numeric(bigT)
-  
-  for (t in 1:bigT) {
-    years_remaining <- bigT - t + 1
-    npv_r_vec[t] <- rent_val * sum(beta_powers[1:years_remaining])
-  }
+  # Pre-compute rental NPV using perpetuity formula (constant for all years)
+  # NPV_Rents = rent × (1+δ)/δ
+  # This represents the present value of receiving rent indefinitely
+  npv_r_perpetuity <- rent_val * (1 + discount_rate) / discount_rate
+  npv_r_vec <- rep(npv_r_perpetuity, bigT)
   
   # ===== PRE-FILTER STORM DATA (OPTIMIZATION 2 - CRITICAL!) =====
   
@@ -247,8 +255,8 @@ calc_tstar_monte_carlo <- function(prop_id, scenario_name, cliff_scen_name,
   
   retreat_years <- numeric(n_sims)
   
-  # Store NPV damages from all simulations to calculate mean
-  npv_d_matrix <- matrix(0, nrow = n_sims, ncol = bigT)
+  # Store annual damages (in dollars) from all simulations
+  damage_matrix <- matrix(0, nrow = n_sims, ncol = bigT)
   
   for (sim in 1:n_sims) {
     
@@ -268,18 +276,33 @@ calc_tstar_monte_carlo <- function(prop_id, scenario_name, cliff_scen_name,
     damage_fraction <- a / (1 + exp(-b * (storm_depths - d)))
     damage_fraction <- pmax(damage_fraction, 0)
     annual_damages <- damage_fraction * str_val
-    
+    # Ensure annual_damages matches bigT exactly
+    if (length(annual_damages) < bigT) {
+      annual_damages <- c(annual_damages, rep(0, bigT - length(annual_damages)))
+    } else if (length(annual_damages) > bigT) {
+      annual_damages <- annual_damages[1:bigT]
+    }
     # Calculate NPV of damages from each potential starting year
-    # NOTE: This loop is hard to vectorize without loss of accuracy
-    # Performance: ~80 iterations is negligible compared to other operations
+    # NPV_D(t) = Σ(k=t to T̂)[D_k×SV/(1+δ)^(k-t)] + [D_T̂×SV/δ] × 1/(1+δ)^(T̂-t)
+    # Part 1: Known damages from t to 2100
+    # Part 2: Perpetual damages after 2100 (constant at year 2100 level)
     npv_d_vec <- numeric(bigT)
     for (t in 1:bigT) {
       years_remaining <- bigT - t + 1
-      npv_d_vec[t] <- sum(annual_damages[t:bigT] * beta_powers[1:years_remaining])
+      
+      # Part 1: Known damages from t to T̂ (2100)
+      npv_known <- sum(annual_damages[t:bigT] * beta_powers[1:years_remaining])
+      
+      # Part 2: Perpetual damages after T̂ (constant at 2100 level)
+      final_damage <- annual_damages[bigT]  # Year 2100 damage level
+      discount_to_T_hat <- beta^years_remaining
+      npv_perpetual <- (final_damage / discount_rate) * discount_to_T_hat
+      
+      npv_d_vec[t] <- npv_known + npv_perpetual
     }
     
-    # Store this simulation's NPV damages
-    npv_d_matrix[sim, ] <- npv_d_vec
+    # Store this simulation's annual damages (in dollars)
+    damage_matrix[sim, ] <- annual_damages
     
     # Find retreat year for this timeline (vectorized comparison)
     # NPV(staying) = NPV(net rent) - NPV(damages)
@@ -297,8 +320,11 @@ calc_tstar_monte_carlo <- function(prop_id, scenario_name, cliff_scen_name,
     retreat_years[sim] <- t_star
   }
   
-  # Calculate mean NPV damages across all simulations
-  npv_d_vec_mean <- colMeans(npv_d_matrix)
+  # Calculate damage statistics across all simulations (in dollars per year)
+  mean_annual_damages <- colMeans(damage_matrix)
+  sd_annual_damages <- apply(damage_matrix, 2, sd)
+  q05_annual_damages <- apply(damage_matrix, 2, quantile, probs = 0.05, na.rm = TRUE)
+  q95_annual_damages <- apply(damage_matrix, 2, quantile, probs = 0.95, na.rm = TRUE)
   
   # ===== AGGREGATE STATISTICS =====
   
@@ -339,7 +365,7 @@ calc_tstar_monte_carlo <- function(prop_id, scenario_name, cliff_scen_name,
     parcel_id = prop_id,
     scenario = scenario_name,
     cliff_scenario = cliff_scen_name,
-    retreat_year = if (tstar_mean > bigT) NA_real_ else tstar_mean,  # NA if beyond horizon
+    retreat_year = if (tstar_mean > bigT) NA_real_ else tstar_mean,
     mc_enabled = TRUE,
     mc_n_sims = n_sims,
     mc_mean_year = tstar_mean,
@@ -350,22 +376,75 @@ calc_tstar_monte_carlo <- function(prop_id, scenario_name, cliff_scen_name,
     mc_q75_year = tstar_q75,
     mc_q95_year = tstar_q95,
     mc_range_years = tstar_q95 - tstar_q05,
-    retreat_trigger = retreat_trigger,
-    npv_rent_annual = list(npv_r_vec), 
-    npv_damages_annual = list(npv_d_vec_mean),  # Use mean across simulations
-    npv_net_annual = list(npv_r_vec - npv_d_vec_mean),
+    mean_annual_damages = list(mean_annual_damages),
+    sd_annual_damages = list(sd_annual_damages),
+    q05_annual_damages = list(q05_annual_damages),
+    q95_annual_damages = list(q95_annual_damages),
     timing_category = timing_category,
     cliff_exposure_status = cliff_exposure_status,
-    initial_cliff_dist_m = initial_cliff_dist
+    initial_cliff_dist_m = initial_cliff_dist,
+    damage_matrix_data = list(damage_matrix),
+    tstar_distribution = list(retreat_years)  # Add T* distribution for Shiny
   )
   
   # Optionally save full distribution for Shiny visualization
-  # This creates a list attribute that can be extracted later
   attr(results_summary, "mc_distribution") <- retreat_years
   
   return(results_summary)
 }
 
+
+
+#' Save Monte Carlo damage distributions to CSV
+#' 
+#' Extracts annual damage timelines from each simulation and saves in long format.
+#' 
+#' @param mc_results Data frame with Monte Carlo results (must have damage_matrix attributes)
+#' @param output_path File path to save distributions CSV
+#' @return Data frame in long format: parcel_id, scenario, sim_num, year, annual_damage
+save_mc_damage_distributions <- function(mc_results, output_path) {
+  
+  # Extract damage matrices from result attributes
+  distributions_list <- list()
+  
+  for (i in 1:nrow(mc_results)) {
+    row_data <- mc_results[i, ]
+    
+    # Extract damage matrix attribute
+    damage_matrix <- row_data$damage_matrix_data[[1]]
+    
+    if (!is.null(damage_matrix) && nrow(damage_matrix) > 0) {
+      
+      n_sims <- nrow(damage_matrix)
+      n_years <- ncol(damage_matrix)
+      
+      # Convert matrix to long format
+      distributions_list[[i]] <- tibble(
+        parcel_id = rep(row_data$parcel_id, n_sims * n_years),
+        scenario = rep(row_data$scenario, n_sims * n_years),
+        cliff_scenario = rep(row_data$cliff_scenario, n_sims * n_years),
+        sim_num = rep(1:n_sims, each = n_years),
+        year = rep(1:n_years, times = n_sims),
+        annual_damage = as.vector(t(damage_matrix)),  # Row-major order
+        rental_yield = rep(row_data$rental_yield, n_sims * n_years),
+        discount_rate = rep(row_data$discount_rate, n_sims * n_years),
+        damage_threshold = rep(row_data$damage_threshold, n_sims * n_years)
+      )
+    }
+  }
+  
+  if (length(distributions_list) > 0) {
+    distributions_df <- bind_rows(distributions_list)
+    write_csv(distributions_df, output_path)
+    message("✓ Saved MC damage distributions: ", basename(output_path))
+    message("  Total rows: ", format(nrow(distributions_df), big.mark = ","))
+    message("  Format: parcel_id, scenario, sim_num, year, annual_damage (dollars)")
+    return(distributions_df)
+  } else {
+    message("⚠ No MC damage distributions found in results")
+    return(NULL)
+  }
+}
 
 # UTILITY: EXTRACT AND SAVE MONTE CARLO DISTRIBUTIONS
 
@@ -377,213 +456,213 @@ calc_tstar_monte_carlo <- function(prop_id, scenario_name, cliff_scen_name,
 #' @param mc_results Data frame with Monte Carlo results (from calc_tstar_monte_carlo)
 #' @param output_path File path to save distributions CSV
 #' @return Data frame in long format: parcel_id, scenario, sim_num, retreat_year
-save_mc_distributions <- function(mc_results, output_path) {
-  
-  # Extract distributions from attributes
-  distributions_list <- list()
-  
-  for (i in 1:nrow(mc_results)) {
-    row_data <- mc_results[i, ]
-    dist <- attr(row_data, "mc_distribution")
-    
-    if (!is.null(dist)) {
-      distributions_list[[i]] <- tibble(
-        parcel_id = row_data$parcel_id,
-        scenario = row_data$scenario,
-        cliff_scenario = row_data$cliff_scenario,
-        sim_num = 1:length(dist),
-        retreat_year = dist
-      )
-    }
-  }
-  
-  if (length(distributions_list) > 0) {
-    distributions_df <- bind_rows(distributions_list)
-    write_csv(distributions_df, output_path)
-    message("✓ Saved MC distributions: ", basename(output_path))
-    message("  Total rows: ", format(nrow(distributions_df), big.mark = ","))
-    return(distributions_df)
-  } else {
-    message("⚠ No MC distributions found in results")
-    return(NULL)
-  }
-}
-
-
-
-# UTILITY: CALCULATE COMMUNITY-LEVEL STATISTICS
-
-#' Calculate community-level retreat statistics
+#' save_mc_retreat_years <- function(mc_results, output_path) {
+#'   
+#'   # Extract distributions from attributes
+#'   distributions_list <- list()
+#'   
+#'   for (i in 1:nrow(mc_results)) {
+#'     row_data <- mc_results[i, ]
+#'     dist <- attr(row_data, "mc_distribution")
+#'     
+#'     if (!is.null(dist)) {
+#'       distributions_list[[i]] <- tibble(
+#'         parcel_id = row_data$parcel_id,
+#'         scenario = row_data$scenario,
+#'         cliff_scenario = row_data$cliff_scenario,
+#'         sim_num = 1:length(dist),
+#'         retreat_year = dist
+#'       )
+#'     }
+#'   }
+#'   
+#'   if (length(distributions_list) > 0) {
+#'     distributions_df <- bind_rows(distributions_list)
+#'     write_csv(distributions_df, output_path)
+#'     message("✓ Saved MC distributions: ", basename(output_path))
+#'     message("  Total rows: ", format(nrow(distributions_df), big.mark = ","))
+#'     return(distributions_df)
+#'   } else {
+#'     message("⚠ No MC distributions found in results")
+#'     return(NULL)
+#'   }
+#' }
 #' 
-#' @param results Data frame with retreat_year column
-#' @param planning_horizon Planning horizon (default 80 years)
-#' @return List with community statistics
-calculate_community_stats <- function(results, planning_horizon = 80) {
-  
-  total_props <- nrow(results)
-  
-  # Properties that retreat within horizon
-  retreating <- results %>% filter(!is.na(retreat_year) & retreat_year <= planning_horizon)
-  n_retreating <- nrow(retreating)
-  pct_retreating <- 100 * n_retreating / total_props
-  
-  # Properties by timing category
-  timing_breakdown <- results %>%
-    count(timing_category) %>%
-    mutate(
-      percent = 100 * n / total_props,
-      label = paste0(timing_category, ": ", n, " (", round(percent, 1), "%)")
-    )
-  
-  # Properties by retreat trigger
-  trigger_breakdown <- results %>%
-    count(retreat_trigger) %>%
-    mutate(
-      percent = 100 * n / total_props,
-      label = paste0(retreat_trigger, ": ", n, " (", round(percent, 1), "%)")
-    )
-  
-  # Retreat year statistics (for those that retreat)
-  if (n_retreating > 0) {
-    retreat_stats <- list(
-      mean_year = mean(retreating$retreat_year, na.rm = TRUE),
-      median_year = median(retreating$retreat_year, na.rm = TRUE),
-      sd_year = sd(retreating$retreat_year, na.rm = TRUE),
-      min_year = min(retreating$retreat_year, na.rm = TRUE),
-      max_year = max(retreating$retreat_year, na.rm = TRUE)
-    )
-  } else {
-    retreat_stats <- list(
-      mean_year = NA, median_year = NA, sd_year = NA,
-      min_year = NA, max_year = NA
-    )
-  }
-  
-  # Monte Carlo uncertainty (if available)
-  mc_props <- results %>% filter(mc_enabled == TRUE)
-  if (nrow(mc_props) > 0) {
-    mc_stats <- list(
-      n_properties_mc = nrow(mc_props),
-      mean_uncertainty_years = mean(mc_props$mc_sd_year, na.rm = TRUE),
-      mean_range_years = mean(mc_props$mc_range_years, na.rm = TRUE)
-    )
-  } else {
-    mc_stats <- list(
-      n_properties_mc = 0,
-      mean_uncertainty_years = NA,
-      mean_range_years = NA
-    )
-  }
-  
-  # Economic viability (properties economically viable for managed retreat)
-  # Definition: Properties with retreat_year <= planning_horizon
-  # These are candidates for proactive buyout-leaseback
-  economic_viability <- list(
-    total_properties = total_props,
-    n_viable_retreat = n_retreating,
-    pct_viable_retreat = pct_retreating,
-    n_beyond_horizon = total_props - n_retreating,
-    pct_beyond_horizon = 100 * (total_props - n_retreating) / total_props
-  )
-  
-  return(list(
-    economic_viability = economic_viability,
-    retreat_stats = retreat_stats,
-    timing_breakdown = timing_breakdown,
-    trigger_breakdown = trigger_breakdown,
-    mc_stats = mc_stats
-  ))
-}
-
-
-#' Print community statistics summary
 #' 
-#' @param community_stats Output from calculate_community_stats()
-print_community_stats <- function(community_stats) {
-  
-  cat("COMMUNITY-LEVEL STATISTICS\n")
-  
-  # Economic viability
-  ev <- community_stats$economic_viability
-  cat("ECONOMIC VIABILITY FOR MANAGED RETREAT:\n")
-  cat("  Total properties:", ev$total_properties, "\n")
-  cat("  Economically viable for retreat:", ev$n_viable_retreat, 
-      "(", round(ev$pct_viable_retreat, 1), "%)\n")
-  cat("  Beyond planning horizon:", ev$n_beyond_horizon, "(", round(ev$pct_beyond_horizon, 1), "%)\n\n")
-  
-  # Retreat timing
-  rs <- community_stats$retreat_stats
-  if (!is.na(rs$mean_year)) {
-    cat("RETREAT TIMING (for viable properties):\n")
-    cat("  Mean retreat year:", round(rs$mean_year, 1), "\n")
-    cat("  Median retreat year:", round(rs$median_year, 1), "\n")
-    cat("  Range:", rs$min_year, "-", rs$max_year, "years\n")
-    cat("  Standard deviation:", round(rs$sd_year, 1), "years\n\n")
-  }
-  
-  # Timing categories
-  cat("RETREAT TIMING CATEGORIES:\n")
-  for (i in 1:nrow(community_stats$timing_breakdown)) {
-    cat("  ", community_stats$timing_breakdown$label[i], "\n")
-  }
-  cat("\n")
-  
-  # Monte Carlo uncertainty
-  mc <- community_stats$mc_stats
-  if (mc$n_properties_mc > 0) {
-    cat("MONTE CARLO UNCERTAINTY:\n")
-    cat("  Properties with MC:", mc$n_properties_mc, "\n")
-    cat("  Mean uncertainty (SD):", round(mc$mean_uncertainty_years, 1), "years\n")
-    cat("  Mean 90% CI width:", round(mc$mean_range_years, 1), "years\n")
-  }
-  
-  cat("\n========================================\n\n")
-}
-
-
-# UTILITY: PRINT MONTE CARLO SUMMARY
-
-#' Print summary statistics for Monte Carlo results
 #' 
-#' @param mc_results Data frame with Monte Carlo output
-print_mc_summary <- function(mc_results) {
-  
-  mc_props <- mc_results %>% filter(mc_enabled == TRUE)
-  
-  if (nrow(mc_props) == 0) {
-    message("No Monte Carlo results to summarize")
-    return(invisible(NULL))
-  }
-  
-  retreating <- mc_props %>% filter(retreat_year <= max(retreat_year[is.finite(retreat_year)]))
-  
-  message("MONTE CARLO SUMMARY")
-  message("Properties analyzed: ", nrow(mc_props))
-  message("Simulations per property: ", unique(mc_props$mc_n_sims)[1])
-  message("\nRETREAT TIMING (mean across simulations - expected value):")
-  
-  if (nrow(retreating) > 0) {
-    message("  Properties retreating: ", nrow(retreating))
-    message("  Mean retreat year: ", round(mean(retreating$retreat_year, na.rm = TRUE), 1))
-    message("  Median retreat year: ", median(retreating$retreat_year, na.rm = TRUE))
-    
-    message("\nUNCERTAINTY METRICS:")
-    message("  Mean uncertainty (SD): ", round(mean(retreating$mc_sd_year, na.rm = TRUE), 1), " years")
-    message("  Mean 90% CI width: ", round(mean(retreating$mc_range_years, na.rm = TRUE), 1), " years")
-    
-    # Show distribution of retreat years
-    decade_breaks <- seq(0, max(retreating$retreat_year, na.rm = TRUE) + 10, by = 10)
-    decade_counts <- table(cut(retreating$retreat_year, breaks = decade_breaks, include.lowest = TRUE))
-    
-    message("\nRETREAT TIMING DISTRIBUTION (by decade):")
-    for (i in seq_along(decade_counts)) {
-      if (decade_counts[i] > 0) {
-        message("  ", names(decade_counts)[i], ": ", decade_counts[i], " properties")
-      }
-    }
-  } else {
-    message("  No properties retreat within planning horizon")
-  }
-  
-  message("========================================\n")
-}
+#' # UTILITY: CALCULATE COMMUNITY-LEVEL STATISTICS
+#' 
+#' #' Calculate community-level retreat statistics
+#' #' 
+#' #' @param results Data frame with retreat_year column
+#' #' @param planning_horizon Planning horizon (default 80 years)
+#' #' @return List with community statistics
+#' calculate_community_stats <- function(results, planning_horizon = 80) {
+#'   
+#'   total_props <- nrow(results)
+#'   
+#'   # Properties that retreat within horizon
+#'   retreating <- results %>% filter(!is.na(retreat_year) & retreat_year <= planning_horizon)
+#'   n_retreating <- nrow(retreating)
+#'   pct_retreating <- 100 * n_retreating / total_props
+#'   
+#'   # Properties by timing category
+#'   timing_breakdown <- results %>%
+#'     count(timing_category) %>%
+#'     mutate(
+#'       percent = 100 * n / total_props,
+#'       label = paste0(timing_category, ": ", n, " (", round(percent, 1), "%)")
+#'     )
+#'   
+#'   # Properties by retreat trigger
+#'   trigger_breakdown <- results %>%
+#'     count(retreat_trigger) %>%
+#'     mutate(
+#'       percent = 100 * n / total_props,
+#'       label = paste0(retreat_trigger, ": ", n, " (", round(percent, 1), "%)")
+#'     )
+#'   
+#'   # Retreat year statistics (for those that retreat)
+#'   if (n_retreating > 0) {
+#'     retreat_stats <- list(
+#'       mean_year = mean(retreating$retreat_year, na.rm = TRUE),
+#'       median_year = median(retreating$retreat_year, na.rm = TRUE),
+#'       sd_year = sd(retreating$retreat_year, na.rm = TRUE),
+#'       min_year = min(retreating$retreat_year, na.rm = TRUE),
+#'       max_year = max(retreating$retreat_year, na.rm = TRUE)
+#'     )
+#'   } else {
+#'     retreat_stats <- list(
+#'       mean_year = NA, median_year = NA, sd_year = NA,
+#'       min_year = NA, max_year = NA
+#'     )
+#'   }
+#'   
+#'   # Monte Carlo uncertainty (if available)
+#'   mc_props <- results %>% filter(mc_enabled == TRUE)
+#'   if (nrow(mc_props) > 0) {
+#'     mc_stats <- list(
+#'       n_properties_mc = nrow(mc_props),
+#'       mean_uncertainty_years = mean(mc_props$mc_sd_year, na.rm = TRUE),
+#'       mean_range_years = mean(mc_props$mc_range_years, na.rm = TRUE)
+#'     )
+#'   } else {
+#'     mc_stats <- list(
+#'       n_properties_mc = 0,
+#'       mean_uncertainty_years = NA,
+#'       mean_range_years = NA
+#'     )
+#'   }
+#'   
+#'   # Economic viability (properties economically viable for managed retreat)
+#'   # Definition: Properties with retreat_year <= planning_horizon
+#'   # These are candidates for proactive buyout-leaseback
+#'   economic_viability <- list(
+#'     total_properties = total_props,
+#'     n_viable_retreat = n_retreating,
+#'     pct_viable_retreat = pct_retreating,
+#'     n_beyond_horizon = total_props - n_retreating,
+#'     pct_beyond_horizon = 100 * (total_props - n_retreating) / total_props
+#'   )
+#'   
+#'   return(list(
+#'     economic_viability = economic_viability,
+#'     retreat_stats = retreat_stats,
+#'     timing_breakdown = timing_breakdown,
+#'     trigger_breakdown = trigger_breakdown,
+#'     mc_stats = mc_stats
+#'   ))
+#' }
+#' 
+#' 
+#' #' Print community statistics summary
+#' #' 
+#' #' @param community_stats Output from calculate_community_stats()
+#' print_community_stats <- function(community_stats) {
+#'   
+#'   cat("COMMUNITY-LEVEL STATISTICS\n")
+#'   
+#'   # Economic viability
+#'   ev <- community_stats$economic_viability
+#'   cat("ECONOMIC VIABILITY FOR MANAGED RETREAT:\n")
+#'   cat("  Total properties:", ev$total_properties, "\n")
+#'   cat("  Economically viable for retreat:", ev$n_viable_retreat, 
+#'       "(", round(ev$pct_viable_retreat, 1), "%)\n")
+#'   cat("  Beyond planning horizon:", ev$n_beyond_horizon, "(", round(ev$pct_beyond_horizon, 1), "%)\n\n")
+#'   
+#'   # Retreat timing
+#'   rs <- community_stats$retreat_stats
+#'   if (!is.na(rs$mean_year)) {
+#'     cat("RETREAT TIMING (for viable properties):\n")
+#'     cat("  Mean retreat year:", round(rs$mean_year, 1), "\n")
+#'     cat("  Median retreat year:", round(rs$median_year, 1), "\n")
+#'     cat("  Range:", rs$min_year, "-", rs$max_year, "years\n")
+#'     cat("  Standard deviation:", round(rs$sd_year, 1), "years\n\n")
+#'   }
+#'   
+#'   # Timing categories
+#'   cat("RETREAT TIMING CATEGORIES:\n")
+#'   for (i in 1:nrow(community_stats$timing_breakdown)) {
+#'     cat("  ", community_stats$timing_breakdown$label[i], "\n")
+#'   }
+#'   cat("\n")
+#'   
+#'   # Monte Carlo uncertainty
+#'   mc <- community_stats$mc_stats
+#'   if (mc$n_properties_mc > 0) {
+#'     cat("MONTE CARLO UNCERTAINTY:\n")
+#'     cat("  Properties with MC:", mc$n_properties_mc, "\n")
+#'     cat("  Mean uncertainty (SD):", round(mc$mean_uncertainty_years, 1), "years\n")
+#'     cat("  Mean 90% CI width:", round(mc$mean_range_years, 1), "years\n")
+#'   }
+#'   
+#'   cat("\n========================================\n\n")
+#' }
+#' 
+#' 
+#' # UTILITY: PRINT MONTE CARLO SUMMARY
+#' 
+#' #' Print summary statistics for Monte Carlo results
+#' #' 
+#' #' @param mc_results Data frame with Monte Carlo output
+#' print_mc_summary <- function(mc_results) {
+#'   
+#'   mc_props <- mc_results %>% filter(mc_enabled == TRUE)
+#'   
+#'   if (nrow(mc_props) == 0) {
+#'     message("No Monte Carlo results to summarize")
+#'     return(invisible(NULL))
+#'   }
+#'   
+#'   retreating <- mc_props %>% filter(retreat_year <= max(retreat_year[is.finite(retreat_year)]))
+#'   
+#'   message("MONTE CARLO SUMMARY")
+#'   message("Properties analyzed: ", nrow(mc_props))
+#'   message("Simulations per property: ", unique(mc_props$mc_n_sims)[1])
+#'   message("\nRETREAT TIMING (mean across simulations - expected value):")
+#'   
+#'   if (nrow(retreating) > 0) {
+#'     message("  Properties retreating: ", nrow(retreating))
+#'     message("  Mean retreat year: ", round(mean(retreating$retreat_year, na.rm = TRUE), 1))
+#'     message("  Median retreat year: ", median(retreating$retreat_year, na.rm = TRUE))
+#'     
+#'     message("\nUNCERTAINTY METRICS:")
+#'     message("  Mean uncertainty (SD): ", round(mean(retreating$mc_sd_year, na.rm = TRUE), 1), " years")
+#'     message("  Mean 90% CI width: ", round(mean(retreating$mc_range_years, na.rm = TRUE), 1), " years")
+#'     
+#'     # Show distribution of retreat years
+#'     decade_breaks <- seq(0, max(retreating$retreat_year, na.rm = TRUE) + 10, by = 10)
+#'     decade_counts <- table(cut(retreating$retreat_year, breaks = decade_breaks, include.lowest = TRUE))
+#'     
+#'     message("\nRETREAT TIMING DISTRIBUTION (by decade):")
+#'     for (i in seq_along(decade_counts)) {
+#'       if (decade_counts[i] > 0) {
+#'         message("  ", names(decade_counts)[i], ": ", decade_counts[i], " properties")
+#'       }
+#'     }
+#'   } else {
+#'     message("  No properties retreat within planning horizon")
+#'   }
+#'   
+#'   message("========================================\n")
+#' }

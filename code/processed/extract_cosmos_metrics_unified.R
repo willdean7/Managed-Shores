@@ -78,7 +78,7 @@ library(purrr)
 
 
 # CONFIGURATION
-case_name <- "carpinteria"  # Change for other sites
+case_name <- "isla_vista"  # Change for other sites
 data_dir <- file.path("data", case_name)
 cosmos_dir <- file.path(data_dir, "cosmos")
 derived_dir <- file.path(data_dir, "derived")
@@ -463,14 +463,7 @@ if (!exists("SKIP_AVERAGE_CONDITIONS") || !SKIP_AVERAGE_CONDITIONS) {
 } # End of average conditions extraction
 
 # ============================================================================
-# CLIFF RETREAT HAZARDS - BASELINE-AWARE VERSION
-# ============================================================================
-# This section replaces lines ~470-735 in extract_cosmos_metrics_unified.R
-#
-# Key Changes:
-# 1. Separates BASELINE (current cliff) from PROJECTIONS (future by SLR)
-# 2. Outputs baseline_cliff_dist_m AND cliff_dist_future_m
-# 3. Prevents using future projections as baseline (the original bug)
+# CLIFF RETREAT HAZARDS - BASELINE
 # ============================================================================
 
 cliff_metrics <- tibble()
@@ -493,9 +486,12 @@ if (dir.exists(cliff_dir)) {
     message("  Found ", length(all_files), " file(s)")
     
     # Separate baseline and projection files
+    # Pacifica: "baseline_holdtheline_pac.gpkg" and "CenCA_cliff_projections_lines_*.gpkg"
+    # Isla Vista: no separate baseline file; "CliffEdgePositions_*_vFinal_*.gpkg" are projections
+    #             "CliffEdgePositionUncertainty_*.gpkg" are uncertainty bounds (skip)
     baseline_files <- grep("baseline_", all_files, value = TRUE, ignore.case = TRUE)
-    projection_files <- grep("projection.*lines|CliffEdge", all_files, value = TRUE, ignore.case = TRUE)
-    projection_files <- projection_files[!grepl("baseline", projection_files, ignore.case = TRUE)]
+    projection_files <- grep("projection.*lines|CliffEdgePositions_.*vFinal", all_files, value = TRUE, ignore.case = TRUE)
+    projection_files <- projection_files[!grepl("baseline|Uncertainty", projection_files, ignore.case = TRUE)]
     
     message("\n  Baseline files: ", length(baseline_files))
     for (f in baseline_files) message("    - ", basename(f))
@@ -575,7 +571,12 @@ if (dir.exists(cliff_dir)) {
           message("      Features: ", nrow(projections))
           message("      Fields: ", paste(head(names(projections), 5), collapse = ", "))
           
-          # Parse SLR from Name field
+          # Parse SLR from Name field (or SLR / slr_m for Isla Vista format)
+          slr_field <- intersect(c("Name", "SLR", "slr_m", "slr", "scenario"), names(projections))[1]
+          if (!is.na(slr_field) && slr_field != "Name") {
+            # Rename to Name so the parsing logic below works uniformly
+            projections <- projections %>% rename(Name = !!slr_field)
+          }
           if ("Name" %in% names(projections)) {
             
             # Try numeric (CenCal format: 25, 50, 100 = cm)
@@ -646,6 +647,25 @@ if (dir.exists(cliff_dir)) {
           message("      ✗ Error: ", e$message)
         })
       }
+    }
+    
+    # ========================================================================
+    # STEP 2b: DERIVE BASELINE FROM PROJECTIONS (Isla Vista / no-baseline fallback)
+    # When no separate baseline_ files exist, use the minimum SLR projection
+    # as the baseline (lowest future scenario ≈ current cliff position)
+    # ========================================================================
+    
+    if (length(baseline_files) == 0 && length(projection_list) > 0) {
+      message("\n  No separate baseline files found - deriving baseline from minimum SLR projection")
+      projections_df_temp <- bind_rows(projection_list)
+      min_slr <- min(projections_df_temp$slr_m)
+      message("  Using SLR = ", sprintf("%.2f", min_slr), "m as baseline (lowest available)")
+      
+      baseline_from_proj <- projections_df_temp %>%
+        filter(slr_m == min_slr) %>%
+        select(parcel_id, scenario, baseline_cliff_dist_m = cliff_dist_future_m)
+      
+      baseline_list <- split(baseline_from_proj, baseline_from_proj$scenario)
     }
     
     # ========================================================================
