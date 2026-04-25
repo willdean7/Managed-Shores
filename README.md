@@ -19,7 +19,6 @@ High-resolution coastal hazard modeling using USGS CoSMoS (Coastal Storm Modelin
 Novel financial framework evaluating:
 - Net present value (NPV) of government buyout-leaseback programs
 - Optimal retreat timing balancing rental income against flood damages
-- Structure depreciation and land value appreciation over time
 - Government vs. private property owner economic perspectives
 - Sensitivity analysis across discount rates, damage scenarios, and SLR projections
 
@@ -29,7 +28,7 @@ Application to five California coastal communities:
 - **Isla Vista** - High-density student housing on coastal bluffs
 - **King Salmon** - Low-income community on Humboldt Bay
 - **Pacifica** - Eroding bluff properties south of San Francisco
-- **Silver Strand** - Narrow barrier island in Oxnard
+- **Stinson Beach** - High Value backed by estuary
 
 ### Interactive Visualization
 Shiny dashboard (`cosmos_shiny_v2.R`) for exploring:
@@ -163,7 +162,7 @@ Analysis across case studies reveals:
 - Cliff erosion drives earlier retreat in communities like Pacifica and Isla Vista
 - Economic outcomes highly sensitive to discount rates and damage assumptions
 
-*Full results pending thesis completion (Spring 2026)*
+
 
 ## Contributing
 
@@ -238,4 +237,4 @@ For questions about the project, data access, or collaboration opportunities, pl
 
 ---
 
-*Last updated: January 2026*
+*Last updated: March 2026*
