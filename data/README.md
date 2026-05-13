@@ -87,4 +87,4 @@ Columns inherited from Redfin MLS exports — including `SOLD DATE`, `HOA/MONTH`
 
 ## Contact
 
-For questions about the data, contact the repository owner at willdean7@bren.ucsb.edu
+For questions about the data, contact the repository owner at wdean@bren.ucsb.edu
