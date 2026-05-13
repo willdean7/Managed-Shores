@@ -61,11 +61,11 @@ Managed_Shores/
 │   ├── isla_vista/                         # Case study: Isla Vista
 │   ├── king_salmon/                        # Case study: King Salmon
 │   ├── pacifica/                           # Case study: Pacifica
-│   ├── silver_strand/                      # Case study: Silver Strand
+│   ├── stinson/                            # Case study: Stinson
 │   ├── landprices_CA_ms.csv               # State land value index
 │   └── README.md                           # Data documentation
 ├── doc/                                    # Project documentation
-│   └── LICENSE-data.txt                    # Data license (CC BY 4.0)
+│   └── LICENSE-data.txt                    # Data license (CC0 1.0)
 ├── LICENSE                                 # Code license (MIT)
 ├── README.md                               # This file
 ├── .gitignore                              # Version control exclusions
@@ -214,7 +214,7 @@ This project serves as the Group Project thesis for the Master of Environmental 
 ## License
 
 - **Code**: MIT License (see `LICENSE`)
-- **Data & Documentation**: Creative Commons Attribution 4.0 International (CC BY 4.0) (see `doc/LICENSE-data.txt`)
+- **Data & Documentation**: CC0 1.0 Universal (Public Domain Dedication)
 
 ## Citation
 
