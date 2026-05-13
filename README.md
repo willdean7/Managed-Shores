@@ -225,7 +225,7 @@ UC Santa Barbara.
 ## Contact
 
 **William Dean**
-willdean7@bren.ucsb.edu
+wdean@bren.ucsb.edu
 [GitHub](https://github.com/willdean7)
 
 For questions about the project, data access, or collaboration opportunities, please open an issue or contact directly.
